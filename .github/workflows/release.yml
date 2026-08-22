@@ -1,0 +1,108 @@
+name: Release
+
+on:
+    push:
+        tags: ["v*"]
+
+permissions:
+    contents: read
+
+env:
+    RUST_VERSION: "1.97.1"
+
+jobs:
+    build:
+        name: Build ${{ matrix.target }}
+        runs-on: ${{ matrix.runner }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - runner: ubuntu-24.04
+                      target: x86_64-unknown-linux-musl
+                    - runner: ubuntu-24.04-arm
+                      target: aarch64-unknown-linux-musl
+                    - runner: macos-15-intel
+                      target: x86_64-apple-darwin
+                    - runner: macos-15
+                      target: aarch64-apple-darwin
+
+        env:
+            MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+        steps:
+            - uses: actions/checkout@v6
+            - name: Verify tag matches Cargo.toml
+              shell: bash
+              run: |
+                  crate_version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+                  [[ "$crate_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+                  test "$GITHUB_REF_NAME" = "v$crate_version"
+            - name: Install release Rust
+              run: |
+                  rustup toolchain install "$RUST_VERSION" --profile minimal --target "${{ matrix.target }}"
+                  rustup default "$RUST_VERSION"
+            - name: Install musl linker
+              if: runner.os == 'Linux'
+              shell: bash
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install --yes musl-tools
+                  case "${{ matrix.target }}" in
+                    x86_64-*)
+                      echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> "$GITHUB_ENV"
+                      ;;
+                    aarch64-*)
+                      echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> "$GITHUB_ENV"
+                      ;;
+                  esac
+            - name: Test
+              run: cargo test --locked --target "${{ matrix.target }}"
+            - name: Build
+              run: cargo build --locked --release --target "${{ matrix.target }}"
+            - name: Package
+              shell: bash
+              run: |
+                  target="${{ matrix.target }}"
+                  package="$RUNNER_TEMP/package"
+                  mkdir -p "$package" dist
+                  cp "target/$target/release/ask" README.md LICENSE "$package/"
+                  chmod 755 "$package/ask"
+                  "$package/ask" -v | grep -Fx "${GITHUB_REF_NAME#v}"
+                  "$package/ask" --version | grep -Fx "${GITHUB_REF_NAME#v}"
+                  tar -C "$package" -czf "dist/ask-$target.tar.gz" ask README.md LICENSE
+            - uses: actions/upload-artifact@v7
+              with:
+                  name: release-${{ matrix.target }}
+                  path: dist/*.tar.gz
+                  if-no-files-found: error
+
+    draft:
+        name: Create draft release
+        needs: build
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: write
+
+        steps:
+            - uses: actions/download-artifact@v8
+              with:
+                  pattern: release-*
+                  path: dist
+                  merge-multiple: true
+            - name: Create checksums
+              shell: bash
+              run: |
+                  test "$(find dist -maxdepth 1 -name 'ask-*.tar.gz' | wc -l)" -eq 4
+                  cd dist
+                  for archive in ask-*.tar.gz; do
+                    sha256sum "$archive" > "$archive.sha256"
+                  done
+            - name: Create draft release
+              env:
+                  GH_REPO: ${{ github.repository }}
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  gh release create "$GITHUB_REF_NAME" \
+                    dist/*.tar.gz dist/*.sha256 \
+                    --draft --verify-tag --generate-notes
