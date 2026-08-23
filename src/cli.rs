@@ -54,7 +54,7 @@ pub fn parse(args: impl Iterator<Item = OsString>) -> Result<Mode, String> {
                 "-h" | "--help" => {
                     return Ok(Mode::Help);
                 }
-                "-V" | "-v" | "--version" => {
+                "-V" | "--version" => {
                     return Ok(Mode::Version);
                 }
                 "-c" | "--continue" => {
@@ -172,7 +172,6 @@ mod tests {
     #[test]
     fn parses_version_flags() {
         assert_eq!(parse(args(&["-V"])).unwrap(), Mode::Version);
-        assert_eq!(parse(args(&["-v"])).unwrap(), Mode::Version);
         assert_eq!(parse(args(&["--version"])).unwrap(), Mode::Version);
     }
 
