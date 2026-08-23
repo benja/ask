@@ -84,7 +84,7 @@ ask -V                     print the version
 
 Answers go to stdout. Prompts and errors go to stderr, so one-shot answers are safe to pipe. Agents start in the current directory and run read-only.
 
-ask only checks for updates when you run `ask --upgrade`.
+ask checks for updates at most once a day. If a new version is available, it lets you know when you get your shell back. You won't get another notice for that version. Set `ASK_NO_UPDATE_CHECK=1` to turn this off. ask only updates when you run `ask --upgrade`.
 
 ## How it works
 

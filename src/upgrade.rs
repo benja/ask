@@ -71,6 +71,17 @@ fn latest_release() -> Result<Version, String> {
     parse_release(&output)
 }
 
+pub(crate) fn latest_release_version() -> Result<String, String> {
+    latest_release().map(|version| version.to_string())
+}
+
+pub(crate) fn is_newer_release(latest: &str) -> bool {
+    let Ok(current) = Version::parse(env!("CARGO_PKG_VERSION")) else {
+        return false;
+    };
+    Version::parse(latest).is_ok_and(|latest| latest > current)
+}
+
 fn fetch_release() -> Result<Vec<u8>, String> {
     match Command::new("curl")
         .args([

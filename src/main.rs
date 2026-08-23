@@ -8,6 +8,7 @@ mod settings_ui;
 mod spinner;
 mod state;
 mod storage;
+mod update_check;
 mod upgrade;
 
 use std::process::ExitCode;
@@ -28,8 +29,9 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let mode = cli::parse(std::env::args_os().skip(1))?;
+    let update_check = update_check::Check::start(update_checks_enabled(&mode));
 
-    match mode {
+    let result = match mode {
         cli::Mode::Help => {
             write_stdout(&[cli::HELP.as_bytes()])?;
             Ok(())
@@ -67,7 +69,26 @@ fn run() -> Result<(), String> {
         }
         cli::Mode::Sessions => sessions(),
         cli::Mode::Settings => standalone_settings(),
+    };
+    if result.is_ok()
+        && let Some(notice) = update_check.notice()
+    {
+        eprintln!("{notice}");
     }
+    result
+}
+
+fn update_checks_enabled(mode: &cli::Mode) -> bool {
+    use std::io::{self, IsTerminal};
+
+    std::env::var_os("ASK_NO_UPDATE_CHECK").is_none()
+        && io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && io::stderr().is_terminal()
+        && !matches!(
+            mode,
+            cli::Mode::Help | cli::Mode::Version | cli::Mode::Upgrade
+        )
 }
 
 struct Settings {
