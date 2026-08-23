@@ -3,11 +3,12 @@ use std::io::{self, Write};
 use crossterm::cursor::{Hide, MoveTo, MoveToColumn, MoveUp, Show};
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers,
+    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::style::{Attribute, Print, SetAttribute};
-use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size};
 use unicode_width::UnicodeWidthStr;
 
 const COMMANDS: &[Command] = &[Command {
@@ -36,6 +37,7 @@ impl Prompt {
         let mut selected = 0;
         let mut dismissed = false;
         let mut rendered_suggestions = 0;
+        let mut rendered_cursor_row = 0;
 
         loop {
             let suggestions = if dismissed {
@@ -44,18 +46,20 @@ impl Prompt {
                 matching_commands(&line)
             };
             selected = selected.min(suggestions.len().saturating_sub(1));
-            draw(
+            rendered_cursor_row = draw(
                 &mut output,
                 &line,
                 cursor,
                 &suggestions,
                 selected,
                 rendered_suggestions,
+                rendered_cursor_row,
             )?;
             rendered_suggestions = suggestions.len();
 
             match event::read().map_err(|error| format!("could not read input: {error}"))? {
                 Event::Paste(value) => {
+                    let value = value.replace("\r\n", "\n").replace('\r', "\n");
                     line.insert_str(cursor, &value);
                     cursor += value.len();
                     selected = 0;
@@ -72,7 +76,13 @@ impl Prompt {
                         &mut selected,
                         &mut dismissed,
                     ) {
-                        clear_suggestions(&mut output, &line, cursor, rendered_suggestions)?;
+                        clear_suggestions(
+                            &mut output,
+                            &line,
+                            line.len(),
+                            rendered_suggestions,
+                            rendered_cursor_row,
+                        )?;
                         execute!(output, Print("\r\n"))
                             .and_then(|()| output.flush())
                             .map_err(|error| format!("could not write prompt: {error}"))?;
@@ -215,6 +225,16 @@ fn handle_key(
             *selected = 0;
         }
         KeyCode::Enter => {
+            if key
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+            {
+                line.insert(*cursor, '\n');
+                *cursor += 1;
+                *selected = 0;
+                *dismissed = false;
+                return None;
+            }
             if !suggestions.is_empty() {
                 suggestions[*selected].name.clone_into(line);
             }
@@ -243,14 +263,23 @@ fn draw(
     suggestions: &[&Command],
     selected: usize,
     previous_count: usize,
-) -> Result<(), String> {
+    previous_cursor_row: usize,
+) -> Result<usize, String> {
+    let terminal_width = usize::from(size().map_or(80, |(width, _)| width).max(1));
     let rows = previous_count.max(suggestions.len());
+    if previous_cursor_row > 0 {
+        execute!(
+            output,
+            MoveUp(u16::try_from(previous_cursor_row).unwrap_or(u16::MAX))
+        )
+        .map_err(|error| format!("could not draw prompt: {error}"))?;
+    }
     execute!(
         output,
         MoveToColumn(0),
-        Clear(ClearType::CurrentLine),
+        Clear(ClearType::FromCursorDown),
         Print("> "),
-        Print(line)
+        Print(line.replace('\n', "\r\n"))
     )
     .map_err(|error| format!("could not draw prompt: {error}"))?;
 
@@ -282,13 +311,24 @@ fn draw(
         execute!(output, MoveUp(u16::try_from(rows).unwrap_or(u16::MAX)))
             .map_err(|error| format!("could not draw prompt: {error}"))?;
     }
-    let column = 2_usize.saturating_add(UnicodeWidthStr::width(&line[..cursor]));
+    let (cursor_row, column) = cursor_position(line, cursor, terminal_width);
+    let end_row = cursor_position(line, line.len(), terminal_width)
+        .0
+        .saturating_add(rows);
+    if end_row > cursor_row {
+        execute!(
+            output,
+            MoveUp(u16::try_from(end_row - cursor_row).unwrap_or(u16::MAX))
+        )
+        .map_err(|error| format!("could not draw prompt: {error}"))?;
+    }
     execute!(
         output,
         MoveToColumn(u16::try_from(column).unwrap_or(u16::MAX))
     )
     .and_then(|()| output.flush())
-    .map_err(|error| format!("could not draw prompt: {error}"))
+    .map_err(|error| format!("could not draw prompt: {error}"))?;
+    Ok(cursor_row)
 }
 
 fn clear_suggestions(
@@ -296,8 +336,38 @@ fn clear_suggestions(
     line: &str,
     cursor: usize,
     previous_count: usize,
+    previous_cursor_row: usize,
 ) -> Result<(), String> {
-    draw(output, line, cursor, &[], 0, previous_count)
+    draw(
+        output,
+        line,
+        cursor,
+        &[],
+        0,
+        previous_count,
+        previous_cursor_row,
+    )
+    .map(|_| ())
+}
+
+fn cursor_position(line: &str, cursor: usize, terminal_width: usize) -> (usize, usize) {
+    let before = &line[..cursor];
+    let mut row = 0_usize;
+    let mut cells = 2_usize;
+
+    for (index, logical_line) in before.split('\n').enumerate() {
+        if index > 0 {
+            row = row.saturating_add(1);
+            cells = 0;
+        }
+        cells = cells.saturating_add(UnicodeWidthStr::width(logical_line));
+        row = row.saturating_add(cells.saturating_sub(1) / terminal_width);
+        cells = cells.saturating_sub(
+            (cells.saturating_sub(1) / terminal_width).saturating_mul(terminal_width),
+        );
+    }
+
+    (row, cells.min(terminal_width.saturating_sub(1)))
 }
 
 fn previous_boundary(line: &str, cursor: usize) -> usize {
@@ -350,12 +420,21 @@ impl TerminalInput {
             let _ = disable_raw_mode();
             return Err(format!("could not enable terminal paste: {error}"));
         }
+        execute!(
+            io::stderr(),
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+            )
+        )
+        .map_err(|error| format!("could not enable enhanced keyboard input: {error}"))?;
         Ok(Self)
     }
 }
 
 impl Drop for TerminalInput {
     fn drop(&mut self) {
+        let _ = execute!(io::stderr(), PopKeyboardEnhancementFlags);
         let _ = execute!(io::stderr(), DisableBracketedPaste);
         let _ = disable_raw_mode();
     }
@@ -365,7 +444,9 @@ impl Drop for TerminalInput {
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use super::{Input, backspace, delete_previous_word, handle_key, matching_commands};
+    use super::{
+        Input, backspace, cursor_position, delete_previous_word, handle_key, matching_commands,
+    };
 
     #[test]
     fn suggestions_filter_by_prefix() {
@@ -428,5 +509,58 @@ mod tests {
 
         assert_eq!(line, "ask this ");
         assert_eq!(cursor, line.len());
+    }
+
+    #[test]
+    fn shift_enter_inserts_a_newline_without_submitting() {
+        let mut line = "first".to_owned();
+        let mut cursor = line.len();
+        let mut selected = 0;
+        let mut dismissed = false;
+
+        let input = handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+            &mut line,
+            &mut cursor,
+            &[],
+            &mut selected,
+            &mut dismissed,
+        );
+
+        assert!(input.is_none());
+        assert_eq!(line, "first\n");
+        assert_eq!(cursor, line.len());
+    }
+
+    #[test]
+    fn option_enter_inserts_a_newline_for_terminal_fallbacks() {
+        let mut line = "first".to_owned();
+        let mut cursor = line.len();
+        let mut selected = 0;
+        let mut dismissed = false;
+
+        let input = handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+            &mut line,
+            &mut cursor,
+            &[],
+            &mut selected,
+            &mut dismissed,
+        );
+
+        assert!(input.is_none());
+        assert_eq!(line, "first\n");
+    }
+
+    #[test]
+    fn multiline_cursor_position_uses_the_current_line() {
+        assert_eq!(cursor_position("first\nsecond", 8, 80), (1, 2));
+        assert_eq!(cursor_position("first\nsecond", 12, 80), (1, 6));
+    }
+
+    #[test]
+    fn cursor_position_accounts_for_terminal_wrapping() {
+        assert_eq!(cursor_position("123456789", 9, 10), (1, 1));
+        assert_eq!(cursor_position("1234567890123456789", 19, 10), (2, 1));
     }
 }
