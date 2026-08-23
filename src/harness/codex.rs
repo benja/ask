@@ -4,27 +4,22 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use serde_json::{Value, json};
 
-use super::{Harness, Model, ReasoningLevel, Response, RunOptions, executable_available};
+use super::{Harness, Model, ReasoningLevel, Response, RunOptions};
 use crate::error::{Error, Result};
 
 const FAST_MODELS: &[&str] = &["gpt-5.3-codex-spark", "gpt-5.6-luna"];
 
-pub struct Codex {
+pub(super) struct Codex {
     program: OsString,
     server: Option<AppServer>,
 }
 
 impl Codex {
-    pub fn from_environment() -> Self {
+    pub(super) fn new(program: OsString) -> Self {
         Self {
-            program: std::env::var_os("ASK_CODEX_BIN").unwrap_or_else(|| "codex".into()),
+            program,
             server: None,
         }
-    }
-
-    pub fn is_available() -> bool {
-        let program = std::env::var_os("ASK_CODEX_BIN").unwrap_or_else(|| "codex".into());
-        executable_available(&program)
     }
 
     fn server(&mut self) -> Result<&mut AppServer> {

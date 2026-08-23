@@ -42,10 +42,10 @@ impl Instructions {
         }
     }
 
-    pub fn from_json(value: Option<&Value>, version: u64, field: &str) -> Result<Self> {
+    pub fn from_json(value: Option<&Value>, version: u64) -> Result<Self> {
         match version {
-            1 => Self::from_v1_json(value, field),
-            2 => Self::from_v2_json(value, field),
+            1 => Self::from_v1_json(value),
+            2 => Self::from_v2_json(value),
             _ => Err(Error::new(
                 format!("instruction version {version} is not supported"),
                 "run 'ask --upgrade'",
@@ -53,36 +53,32 @@ impl Instructions {
         }
     }
 
-    fn from_v1_json(value: Option<&Value>, field: &str) -> Result<Self> {
+    fn from_v1_json(value: Option<&Value>) -> Result<Self> {
         match value {
             None | Some(Value::Null) => Ok(Self::AgentDefault),
             Some(Value::String(_)) => Ok(Self::Concise),
-            Some(_) => Err(invalid_instructions(field)),
+            Some(_) => Err(invalid_instructions()),
         }
     }
 
-    fn from_v2_json(value: Option<&Value>, field: &str) -> Result<Self> {
+    fn from_v2_json(value: Option<&Value>) -> Result<Self> {
         match value {
-            None => Ok(Self::Concise),
             Some(Value::Null) => Ok(Self::AgentDefault),
             Some(Value::String(value)) if value == "concise" => Ok(Self::Concise),
             Some(Value::String(value)) if value == "agent_default" => Ok(Self::AgentDefault),
-            Some(Value::String(_)) => Ok(Self::Concise),
-            Some(Value::Object(value))
-                if value.len() == 1 && value.get("custom").is_some_and(Value::is_string) =>
-            {
-                Ok(Self::Custom(
-                    value["custom"].as_str().unwrap_or_default().to_owned(),
-                ))
-            }
-            Some(_) => Err(invalid_instructions(field)),
+            None | Some(Value::String(_)) => Ok(Self::Concise),
+            Some(Value::Object(value)) if value.len() == 1 => value["custom"]
+                .as_str()
+                .map(|value| Self::Custom(value.to_owned()))
+                .ok_or_else(invalid_instructions),
+            Some(_) => Err(invalid_instructions()),
         }
     }
 }
 
-fn invalid_instructions(field: &str) -> Error {
+fn invalid_instructions() -> Error {
     Error::new(
-        format!("config has invalid '{field}'"),
+        "config has invalid 'instructions'",
         "fix or remove the config file, then try again",
     )
 }
@@ -106,7 +102,7 @@ mod tests {
     #[test]
     fn unknown_v2_presets_fall_back_to_concise() {
         assert_eq!(
-            Instructions::from_json(Some(&json!("removed_preset")), 2, "instructions").unwrap(),
+            Instructions::from_json(Some(&json!("removed_preset")), 2).unwrap(),
             Instructions::Concise
         );
     }

@@ -148,11 +148,7 @@ impl Config {
             .ok_or_else(|| invalid_config("config is missing 'agents'"))?;
         let mut config = Self {
             agent,
-            instructions: Instructions::from_json(
-                value.get("instructions"),
-                version,
-                "instructions",
-            )?,
+            instructions: Instructions::from_json(value.get("instructions"), version)?,
             ..Self::default()
         };
         config.load_agent_settings(values)?;

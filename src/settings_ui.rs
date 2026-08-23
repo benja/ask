@@ -62,7 +62,7 @@ fn defaults_menu(config: &mut Config, cache: &mut Cache) -> Result<()> {
             Item::new("Done", "Exit settings"),
         ];
 
-        match choose(
+        match select::choose(
             "Settings",
             "Defaults and answer instructions",
             &items,
@@ -124,7 +124,7 @@ fn session_menu(
             Item::new("Done", "Return to your session"),
         ];
 
-        match choose(
+        match select::choose(
             "Session settings",
             "Model and reasoning apply only to this session",
             &items,
@@ -239,7 +239,7 @@ fn select_instructions(config: &mut Config) -> Result<()> {
         Instructions::AgentDefault => 1,
         Instructions::Custom(_) => 2,
     };
-    let Choice::Selected(index) = choose(
+    let Choice::Selected(index) = select::choose(
         "Instructions",
         "How answers should be written",
         &items,
@@ -286,7 +286,7 @@ fn select_agent(config: &mut Config) -> Result<()> {
         .iter()
         .position(|agent| agent.id == config.agent)
         .unwrap_or(0);
-    let Choice::Selected(index) = choose(
+    let Choice::Selected(index) = select::choose(
         "Default agent",
         "Choose the agent for new sessions",
         &items,
@@ -325,7 +325,7 @@ fn select_model(settings: &mut impl EditableSettings, cache: &mut Cache) -> Resu
         .and_then(|current| models.iter().position(|model| model.id == current))
         .map_or(0, |index| index + 1);
 
-    let Choice::Selected(index) = choose(
+    let Choice::Selected(index) = select::choose(
         "Model",
         &format!("Models supported by {}", harness::agent_name(&agent)),
         &items,
@@ -398,7 +398,7 @@ fn select_reasoning(settings: &mut impl EditableSettings, cache: &mut Cache) -> 
         .and_then(|current| model.reasoning.iter().position(|level| level.id == current))
         .map_or(0, |index| index + 1);
 
-    let Choice::Selected(index) = choose(
+    let Choice::Selected(index) = select::choose(
         "Reasoning",
         &format!("Levels supported by {}", model.name),
         &items,
@@ -416,16 +416,12 @@ fn select_reasoning(settings: &mut impl EditableSettings, cache: &mut Cache) -> 
     settings.save()
 }
 
-fn load_models(agent: &str) -> Result<Vec<Model>> {
-    let mut harness = crate::harness::create(agent)?;
-    harness.models()
-}
-
 fn load_models_with_delayed_feedback(agent: &str) -> Result<Vec<Model>> {
     let (sender, receiver) = mpsc::sync_channel(1);
     let requested = agent.to_owned();
     std::thread::spawn(move || {
-        let _ = sender.send(load_models(&requested));
+        let result = harness::create(&requested).and_then(|mut harness| harness.models());
+        let _ = sender.send(result);
     });
 
     match receiver.recv_timeout(Duration::from_millis(150)) {
@@ -455,10 +451,6 @@ fn title_case(value: &str) -> String {
         .next()
         .map(|first| first.to_uppercase().collect::<String>() + characters.as_str())
         .unwrap_or_default()
-}
-
-fn choose(title: &str, subtitle: &str, items: &[Item], initial: usize) -> Result<Choice> {
-    select::choose(title, subtitle, items, initial)
 }
 
 fn show_loading(title: &str, message: &str) -> Result<()> {

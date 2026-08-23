@@ -4,25 +4,18 @@ use std::process::{Command, Stdio};
 
 use serde_json::{Map, Value, json};
 
-use super::{Harness, Model, Response, RunOptions, executable_available};
+use super::{Harness, Model, Response, RunOptions};
 use crate::error::{Error, Result};
 
 const AGENT_ID: &str = "ask-read-only";
 
-pub struct OpenCode {
+pub(super) struct OpenCode {
     program: OsString,
 }
 
 impl OpenCode {
-    pub fn from_environment() -> Self {
-        Self {
-            program: std::env::var_os("ASK_OPENCODE_BIN").unwrap_or_else(|| "opencode".into()),
-        }
-    }
-
-    pub fn is_available() -> bool {
-        let program = std::env::var_os("ASK_OPENCODE_BIN").unwrap_or_else(|| "opencode".into());
-        executable_available(&program)
+    pub(super) fn new(program: OsString) -> Self {
+        Self { program }
     }
 
     fn command(

@@ -1,9 +1,9 @@
-pub mod claude;
-pub mod codex;
-pub mod opencode;
-pub mod pi;
+mod claude;
+mod codex;
+mod opencode;
+mod pi;
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -15,7 +15,6 @@ pub struct Response {
     pub session_id: String,
 }
 
-#[derive(Clone, Copy)]
 pub struct RunOptions<'a> {
     pub model: Option<&'a str>,
     pub reasoning: Option<&'a str>,
@@ -67,17 +66,21 @@ pub struct Definition {
     pub default_model: Option<&'static str>,
     pub default_reasoning: Option<&'static str>,
     pub reasoning: ReasoningControl,
-    available: fn() -> bool,
-    create: fn() -> Box<dyn Harness>,
+    program_env: &'static str,
+    create: fn(OsString) -> Box<dyn Harness>,
 }
 
 impl Definition {
-    pub fn is_available(&self) -> bool {
-        (self.available)()
+    fn program(&self) -> OsString {
+        std::env::var_os(self.program_env).unwrap_or_else(|| self.id.into())
     }
 
-    pub fn create(&self) -> Box<dyn Harness> {
-        (self.create)()
+    pub fn is_available(&self) -> bool {
+        executable_available(&self.program())
+    }
+
+    fn create(&self) -> Box<dyn Harness> {
+        (self.create)(self.program())
     }
 }
 
@@ -90,8 +93,8 @@ pub static DEFINITIONS: &[Definition] = &[
         default_model: Some("fast"),
         default_reasoning: Some("low"),
         reasoning: ReasoningControl::Selectable,
-        available: codex::Codex::is_available,
-        create: || Box::new(codex::Codex::from_environment()),
+        program_env: "ASK_CODEX_BIN",
+        create: |program| Box::new(codex::Codex::new(program)),
     },
     Definition {
         id: "claude",
@@ -104,8 +107,8 @@ pub static DEFINITIONS: &[Definition] = &[
             label: "Managed by Claude",
             explanation: "Claude Code manages reasoning automatically for its selected model.",
         },
-        available: claude::Claude::is_available,
-        create: || Box::new(claude::Claude::from_environment()),
+        program_env: "ASK_CLAUDE_BIN",
+        create: |program| Box::new(claude::Claude::new(program)),
     },
     Definition {
         id: "opencode",
@@ -118,8 +121,8 @@ pub static DEFINITIONS: &[Definition] = &[
             label: "Managed by OpenCode",
             explanation: "OpenCode manages reasoning through model-specific variants.",
         },
-        available: opencode::OpenCode::is_available,
-        create: || Box::new(opencode::OpenCode::from_environment()),
+        program_env: "ASK_OPENCODE_BIN",
+        create: |program| Box::new(opencode::OpenCode::new(program)),
     },
     Definition {
         id: "pi",
@@ -129,8 +132,8 @@ pub static DEFINITIONS: &[Definition] = &[
         default_model: None,
         default_reasoning: None,
         reasoning: ReasoningControl::Selectable,
-        available: pi::Pi::is_available,
-        create: || Box::new(pi::Pi::from_environment()),
+        program_env: "ASK_PI_BIN",
+        create: |program| Box::new(pi::Pi::new(program)),
     },
 ];
 

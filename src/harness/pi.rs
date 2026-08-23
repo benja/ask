@@ -4,26 +4,19 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
-use super::{Harness, Model, ReasoningLevel, Response, RunOptions, executable_available};
+use super::{Harness, Model, ReasoningLevel, Response, RunOptions};
 use crate::error::{Error, Result};
 
 const READ_ONLY_TOOLS: &str = "read,grep,find,ls";
 const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh"];
 
-pub struct Pi {
+pub(super) struct Pi {
     program: OsString,
 }
 
 impl Pi {
-    pub fn from_environment() -> Self {
-        Self {
-            program: std::env::var_os("ASK_PI_BIN").unwrap_or_else(|| "pi".into()),
-        }
-    }
-
-    pub fn is_available() -> bool {
-        let program = std::env::var_os("ASK_PI_BIN").unwrap_or_else(|| "pi".into());
-        executable_available(&program)
+    pub(super) fn new(program: OsString) -> Self {
+        Self { program }
     }
 
     fn command(

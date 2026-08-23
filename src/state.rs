@@ -104,7 +104,6 @@ impl Session {
 
         let harness_session_id = value["harness_session_id"]
             .as_str()
-            .or_else(|| value["harness_id"].as_str())
             .ok_or_else(|| invalid_session("missing or invalid 'harness_session_id'"))?
             .to_owned();
         let settings = value
@@ -309,21 +308,5 @@ mod tests {
         };
 
         assert_eq!(Session::from_json(&session.to_json()).unwrap(), session);
-    }
-
-    #[test]
-    fn reads_the_unreleased_harness_id_name() {
-        let session = Session::from_json(&serde_json::json!({
-            "version": 1,
-            "agent": "codex",
-            "harness_id": "legacy-id",
-            "cwd": "/tmp/project",
-            "updated_at": 42,
-            "turns": []
-        }))
-        .unwrap();
-
-        assert_eq!(session.harness_session_id, "legacy-id");
-        assert_eq!(session.settings, None);
     }
 }
