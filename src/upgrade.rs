@@ -42,7 +42,7 @@ impl fmt::Display for Version {
     }
 }
 
-pub fn run() -> Result<String, String> {
+pub fn run() -> Result<Option<String>, String> {
     let current = Version::parse(env!("CARGO_PKG_VERSION"))
         .map_err(|_| "ask was built with an unsupported version".to_string())?;
     let latest = latest_release()?;
@@ -53,15 +53,15 @@ fn apply_upgrade(
     current: Version,
     latest: Version,
     install: impl FnOnce(Version) -> Result<(), String>,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
     match latest.cmp(&current) {
-        Ordering::Equal => Ok(format!("ask is already up to date (v{current})")),
-        Ordering::Less => Ok(format!(
+        Ordering::Equal => Ok(Some(format!("ask is already up to date (v{current})"))),
+        Ordering::Less => Ok(Some(format!(
             "ask v{current} is newer than the latest release (v{latest})"
-        )),
+        ))),
         Ordering::Greater => {
             install(latest)?;
-            Ok(format!("updated ask to v{latest}"))
+            Ok(None)
         }
     }
 }
@@ -249,7 +249,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(installed, Some(version("0.10.0")));
-        assert_eq!(message, "updated ask to v0.10.0");
+        assert_eq!(message, None);
     }
 
     #[test]
@@ -263,10 +263,13 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(current, "ask is already up to date (v0.1.0)");
         assert_eq!(
-            newer,
-            "ask v1.0.0 is newer than the latest release (v0.9.9)"
+            current.as_deref(),
+            Some("ask is already up to date (v0.1.0)")
+        );
+        assert_eq!(
+            newer.as_deref(),
+            Some("ask v1.0.0 is newer than the latest release (v0.9.9)")
         );
     }
 

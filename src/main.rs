@@ -41,8 +41,10 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         cli::Mode::Upgrade => {
-            let message = upgrade::run()?;
-            write_stdout(&[message.as_bytes(), b"\n"])
+            if let Some(message) = upgrade::run()? {
+                write_stdout(&[message.as_bytes(), b"\n"])?;
+            }
+            Ok(())
         }
         cli::Mode::OneShot(question) => {
             let config = config::Config::load()?;
