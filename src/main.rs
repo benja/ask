@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod harness;
+mod instructions;
 mod prompt;
 mod render;
 mod select;
@@ -8,12 +9,14 @@ mod settings_ui;
 mod spinner;
 mod state;
 mod storage;
+mod terminal;
 mod update_check;
 mod upgrade;
 
 use std::process::ExitCode;
 
 use harness::Harness;
+use instructions::Instructions;
 
 const SESSION_NAME_WIDTH: usize = 24;
 
@@ -49,12 +52,12 @@ fn run() -> Result<(), String> {
         cli::Mode::OneShot(question) => {
             let config = config::Config::load()?;
             let settings = settings(None, &config, None)?;
-            run_one_shot(&settings, &question, None)
+            run_one_shot(&settings, config.instructions(), &question, None)
         }
         cli::Mode::Interactive => {
             let config = config::Config::load()?;
             let settings = settings(None, &config, None)?;
-            run_interactive(settings, None)
+            run_interactive(settings, None, config)
         }
         cli::Mode::Continue(words) => {
             let config = config::Config::load()?;
@@ -64,9 +67,14 @@ fn run() -> Result<(), String> {
             let agent = session.agent.clone();
             let settings = settings(Some(&agent), &config, Some(&session))?;
             if words.is_empty() {
-                run_interactive(settings, Some(session))
+                run_interactive(settings, Some(session), config)
             } else {
-                run_one_shot(&settings, &words.join(" "), Some(session))
+                run_one_shot(
+                    &settings,
+                    config.instructions(),
+                    &words.join(" "),
+                    Some(session),
+                )
             }
         }
         cli::Mode::Sessions => sessions(),
@@ -97,7 +105,6 @@ struct Settings {
     agent: String,
     model: Option<String>,
     reasoning: Option<String>,
-    instructions: Option<String>,
 }
 
 fn settings(
@@ -123,15 +130,12 @@ fn settings(
         agent,
         model,
         reasoning,
-        instructions: saved.map_or_else(
-            || config.instructions().map(str::to_owned),
-            |settings| settings.instructions.clone(),
-        ),
     })
 }
 
 fn run_one_shot(
     settings: &Settings,
+    instructions: &Instructions,
     question: &str,
     mut saved: Option<state::Session>,
 ) -> Result<(), String> {
@@ -144,6 +148,7 @@ fn run_one_shot(
     let response = ask_turn(
         harness.as_mut(),
         settings,
+        instructions,
         question,
         saved
             .as_ref()
@@ -157,6 +162,7 @@ fn run_one_shot(
 fn run_interactive(
     mut settings: Settings,
     mut saved: Option<state::Session>,
+    mut config: config::Config,
 ) -> Result<(), String> {
     use std::io::{self, IsTerminal};
 
@@ -204,12 +210,15 @@ fn run_interactive(
             let value = parts.next();
             if parts.next().is_some() {
                 eprintln!("ask: {command} accepts at most one value");
+                if terminal {
+                    eprintln!();
+                }
                 continue;
             }
 
             match command {
                 "/settings" if value.is_none() && terminal => {
-                    settings_ui::run_session(&mut settings, &mut settings_cache)?;
+                    settings_ui::run_session(&mut settings, &mut config, &mut settings_cache)?;
                     if let Some(saved) = &mut saved {
                         saved.settings = Some(session_settings(&settings));
                         state::save(saved)?;
@@ -218,7 +227,12 @@ fn run_interactive(
                 "/settings" if value.is_none() => {
                     eprintln!("ask: /settings requires an interactive terminal");
                 }
-                _ => eprintln!("ask: unknown command '{command}' (available: /settings)"),
+                _ => {
+                    eprintln!("ask: unknown command '{command}' (available: /settings)");
+                    if terminal {
+                        eprintln!();
+                    }
+                }
             }
             continue;
         }
@@ -226,6 +240,7 @@ fn run_interactive(
         let response = match ask_turn(
             harness.as_mut(),
             &settings,
+            config.instructions(),
             question,
             session.as_deref(),
             decorate,
@@ -233,10 +248,14 @@ fn run_interactive(
             Ok(response) => response,
             Err(error) if terminal => {
                 eprintln!("ask: {error}");
+                eprintln!();
                 continue;
             }
             Err(error) => return Err(error),
         };
+        if decorate {
+            eprintln!();
+        }
         session = Some(record_turn(
             &mut saved, &settings, &cwd, question, response,
         )?);
@@ -259,6 +278,7 @@ fn standalone_settings() -> Result<(), String> {
 fn ask_turn(
     harness: &mut dyn Harness,
     settings: &Settings,
+    instructions: &Instructions,
     question: &str,
     session_id: Option<&str>,
     decorate: bool,
@@ -271,7 +291,7 @@ fn ask_turn(
         harness::RunOptions {
             model: settings.model.as_deref(),
             reasoning: settings.reasoning.as_deref(),
-            instructions: settings.instructions.as_deref(),
+            instructions: instructions.prompt(),
         },
         &mut |delta| {
             spinner.stop();
@@ -305,7 +325,6 @@ fn session_settings(settings: &Settings) -> state::SessionSettings {
     state::SessionSettings {
         model: settings.model.clone(),
         reasoning: settings.reasoning.clone(),
-        instructions: settings.instructions.clone(),
     }
 }
 
@@ -318,10 +337,17 @@ fn show_history(session: &state::Session, decorate: bool) -> Result<(), String> 
     );
 
     for turn in &session.turns {
-        eprintln!("> {}", turn.user);
+        if decorate {
+            prompt::write_submitted(&turn.user)?;
+        } else {
+            eprintln!("> {}", turn.user);
+        }
         let mut output = TurnOutput::new(decorate);
         output.push(&turn.assistant)?;
         output.finish(&turn.assistant)?;
+        if decorate {
+            eprintln!();
+        }
     }
     Ok(())
 }
@@ -374,7 +400,7 @@ fn sessions() -> Result<(), String> {
     let session = sessions.remove(selected);
     let config = config::Config::load()?;
     let settings = settings(Some(&session.agent), &config, Some(&session))?;
-    run_interactive(settings, Some(session))
+    run_interactive(settings, Some(session), config)
 }
 
 fn selection_after_delete(deleted: usize, remaining: usize) -> Option<usize> {
@@ -570,17 +596,12 @@ mod tests {
         session.settings = Some(SessionSettings {
             model: None,
             reasoning: Some("high".into()),
-            instructions: Some("Explain with examples.".into()),
         });
 
         let settings = settings(Some("codex"), &config, Some(&session)).unwrap();
 
         assert_eq!(settings.model, None);
         assert_eq!(settings.reasoning.as_deref(), Some("high"));
-        assert_eq!(
-            settings.instructions.as_deref(),
-            Some("Explain with examples.")
-        );
     }
 
     #[test]

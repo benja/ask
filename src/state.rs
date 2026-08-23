@@ -20,7 +20,6 @@ pub struct Session {
 pub struct SessionSettings {
     pub model: Option<String>,
     pub reasoning: Option<String>,
-    pub instructions: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -51,7 +50,7 @@ impl Session {
 
     fn to_json(&self) -> Value {
         json!({
-            "version": 1,
+            "version": 2,
             "agent": self.agent,
             "harness_session_id": self.harness_session_id,
             "cwd": self.cwd,
@@ -59,7 +58,6 @@ impl Session {
             "settings": self.settings.as_ref().map(|settings| json!({
                 "model": settings.model,
                 "reasoning": settings.reasoning,
-                "instructions": settings.instructions,
             })),
             "turns": self.turns.iter().map(|turn| json!({
                 "user": turn.user,
@@ -69,6 +67,10 @@ impl Session {
     }
 
     fn from_json(value: &Value) -> Result<Self, String> {
+        let version = value.get("version").and_then(Value::as_u64).unwrap_or(1);
+        if !matches!(version, 1 | 2) {
+            return Err(format!("session version {version} is not supported"));
+        }
         let string = |key: &str| {
             value[key]
                 .as_str()
@@ -108,7 +110,6 @@ impl Session {
                 Ok(SessionSettings {
                     model: optional_string(settings, "model")?,
                     reasoning: optional_string(settings, "reasoning")?,
-                    instructions: optional_string(settings, "instructions")?,
                 })
             })
             .transpose()?;
@@ -254,7 +255,6 @@ mod tests {
             settings: Some(SessionSettings {
                 model: Some("gpt-test".into()),
                 reasoning: Some("high".into()),
-                instructions: None,
             }),
             turns: vec![Turn {
                 user: "hello".into(),

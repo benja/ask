@@ -3,17 +3,18 @@ use std::io::{self, Write};
 use crossterm::cursor::{Hide, MoveTo, MoveToColumn, MoveUp, Show};
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    KeyModifiers, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size};
 use unicode_width::UnicodeWidthStr;
 
+use crate::terminal::keyboard_enhancement_flags;
+
 const COMMANDS: &[Command] = &[Command {
     name: "/settings",
-    description: "change this session",
+    description: "change settings",
 }];
 
 struct Command {
@@ -83,9 +84,16 @@ impl Prompt {
                             rendered_suggestions,
                             rendered_cursor_row,
                         )?;
-                        execute!(output, Print("\r\n"))
-                            .and_then(|()| output.flush())
-                            .map_err(|error| format!("could not write prompt: {error}"))?;
+                        match &input {
+                            Input::Line(line) if !line.trim().is_empty() => {
+                                redraw_submitted(&mut output, line)?;
+                            }
+                            Input::Line(_) | Input::Eof => {
+                                execute!(output, Print("\r\n"))
+                                    .and_then(|()| output.flush())
+                                    .map_err(|error| format!("could not write prompt: {error}"))?;
+                            }
+                        }
                         return Ok(input);
                     }
                 }
@@ -95,51 +103,73 @@ impl Prompt {
     }
 }
 
-pub fn edit_line(title: &str, initial: &str) -> Result<Option<String>, String> {
+pub fn write_submitted(line: &str) -> Result<(), String> {
+    let mut output = io::stderr();
+    draw_submitted(&mut output, line)
+}
+
+fn redraw_submitted(output: &mut impl Write, line: &str) -> Result<(), String> {
+    let terminal_width = usize::from(size().map_or(80, |(width, _)| width).max(1));
+    let row = cursor_position(line, line.len(), terminal_width).0;
+    if row > 0 {
+        execute!(output, MoveUp(u16::try_from(row).unwrap_or(u16::MAX)))
+            .map_err(|error| format!("could not draw submitted message: {error}"))?;
+    }
+    execute!(output, MoveToColumn(0), Clear(ClearType::FromCursorDown))
+        .map_err(|error| format!("could not draw submitted message: {error}"))?;
+    draw_submitted(output, line)
+}
+
+fn draw_submitted(output: &mut impl Write, line: &str) -> Result<(), String> {
+    for (index, logical_line) in line.split('\n').enumerate() {
+        if index > 0 {
+            execute!(output, Print("\r\n"))
+                .map_err(|error| format!("could not draw submitted message: {error}"))?;
+        }
+        execute!(
+            output,
+            SetAttribute(Attribute::Bold),
+            Print(if index == 0 { "> " } else { "  " }),
+            Print(logical_line),
+            SetAttribute(Attribute::Reset)
+        )
+        .map_err(|error| format!("could not draw submitted message: {error}"))?;
+    }
+    execute!(output, Print("\r\n\r\n"))
+        .and_then(|()| output.flush())
+        .map_err(|error| format!("could not draw submitted message: {error}"))
+}
+
+pub fn edit_text(title: &str, initial: &str) -> Result<Option<String>, String> {
     let mut output = io::stderr();
     execute!(output, Show).map_err(|error| format!("could not show text input: {error}"))?;
     let _cursor = HideCursor;
-    let mut line = initial.to_owned();
-    let mut cursor = line.len();
+    let mut text = initial.to_owned();
+    let mut cursor = text.len();
     let mut selected = 0;
     let mut dismissed = true;
 
     loop {
-        execute!(
-            output,
-            MoveTo(0, 0),
-            Clear(ClearType::All),
-            SetAttribute(Attribute::Bold),
-            Print(title),
-            SetAttribute(Attribute::Reset),
-            Print("\r\nOne line. Enter saves; Esc cancels.\r\n\r\n> "),
-            Print(&line),
-            MoveToColumn(
-                u16::try_from(2_usize.saturating_add(UnicodeWidthStr::width(&line[..cursor])))
-                    .unwrap_or(u16::MAX)
-            )
-        )
-        .and_then(|()| output.flush())
-        .map_err(|error| format!("could not draw text input: {error}"))?;
+        draw_text_editor(&mut output, title, &text, cursor)?;
 
         match event::read().map_err(|error| format!("could not read text input: {error}"))? {
             Event::Paste(value) => {
-                let value = value.replace(['\r', '\n'], " ");
-                line.insert_str(cursor, &value);
+                let value = value.replace("\r\n", "\n").replace('\r', "\n");
+                text.insert_str(cursor, &value);
                 cursor += value.len();
             }
             Event::Key(key) if key.code == KeyCode::Esc => return Ok(None),
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 if let Some(input) = handle_key(
                     key,
-                    &mut line,
+                    &mut text,
                     &mut cursor,
                     &[],
                     &mut selected,
                     &mut dismissed,
                 ) {
                     return match input {
-                        Input::Line(line) => Ok(Some(line)),
+                        Input::Line(text) => Ok(Some(text)),
                         Input::Eof => Ok(None),
                     };
                 }
@@ -147,6 +177,33 @@ pub fn edit_line(title: &str, initial: &str) -> Result<Option<String>, String> {
             _ => {}
         }
     }
+}
+
+fn draw_text_editor(
+    output: &mut impl Write,
+    title: &str,
+    text: &str,
+    cursor: usize,
+) -> Result<(), String> {
+    let width = usize::from(size().map_or(80, |(width, _)| width).max(1));
+    let (cursor_row, cursor_column) = cursor_position(text, cursor, width);
+
+    execute!(
+        output,
+        MoveTo(0, 0),
+        Clear(ClearType::All),
+        SetAttribute(Attribute::Bold),
+        Print(title),
+        SetAttribute(Attribute::Reset),
+        Print("\r\nShift+Enter new line  Enter save  Esc cancel\r\n\r\n> "),
+        Print(text.replace('\n', "\r\n")),
+        MoveTo(
+            u16::try_from(cursor_column).unwrap_or(u16::MAX),
+            u16::try_from(cursor_row.saturating_add(3)).unwrap_or(u16::MAX)
+        )
+    )
+    .and_then(|()| output.flush())
+    .map_err(|error| format!("could not draw text input: {error}"))
 }
 
 struct HideCursor;
@@ -422,10 +479,7 @@ impl TerminalInput {
         }
         execute!(
             io::stderr(),
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-            )
+            PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
         )
         .map_err(|error| format!("could not enable enhanced keyboard input: {error}"))?;
         Ok(Self)
@@ -445,8 +499,20 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::{
-        Input, backspace, cursor_position, delete_previous_word, handle_key, matching_commands,
+        Input, backspace, cursor_position, delete_previous_word, draw_submitted, handle_key,
+        matching_commands,
     };
+
+    #[test]
+    fn submitted_messages_are_bold_aligned_and_have_breathing_room() {
+        let mut output = Vec::new();
+        draw_submitted(&mut output, "first\nsecond").unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("\x1b[1m> first"));
+        assert!(output.contains("\r\n\x1b[1m  second"));
+        assert!(output.ends_with("\r\n\r\n"));
+    }
 
     #[test]
     fn suggestions_filter_by_prefix() {

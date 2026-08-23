@@ -15,7 +15,7 @@ pub const HELP: &str = concat!(
     "Options:\n",
     "  -c, --continue      Continue the latest session here\n",
     "  -s, --sessions      Choose a saved session to continue\n",
-    "      --settings      Choose defaults for new sessions\n",
+    "      --settings      Configure defaults and instructions\n",
     "      --upgrade       Upgrade to the latest release\n",
     "  -h, --help          Print help\n",
     "  -V, --version       Print version\n",

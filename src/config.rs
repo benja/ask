@@ -4,13 +4,12 @@ use std::path::PathBuf;
 
 use serde_json::{Map, Value, json};
 
+use crate::instructions::Instructions;
 use crate::{harness, storage};
-
-pub const DEFAULT_INSTRUCTIONS: &str = "Answer concisely and directly. Use the fewest words and lines needed to be useful. Do not over-explain, repeat the question, or add background unless asked. When a command answers the question, lead with it and include only essential context.";
 
 pub struct Config {
     pub agent: String,
-    instructions: Option<String>,
+    instructions: Instructions,
     agents: BTreeMap<String, AgentSettings>,
 }
 
@@ -35,7 +34,7 @@ impl Default for Config {
             .collect();
         Self {
             agent: "codex".into(),
-            instructions: Some(DEFAULT_INSTRUCTIONS.into()),
+            instructions: Instructions::default(),
             agents,
         }
     }
@@ -72,9 +71,9 @@ impl Config {
             })
             .collect::<Map<_, _>>();
         let bytes = serde_json::to_vec_pretty(&json!({
-            "version": 1,
+            "version": 2,
             "agent": self.agent,
-            "instructions": self.instructions,
+            "instructions": self.instructions.to_json(),
             "agents": agents,
         }))
         .map_err(|error| format!("could not encode ask config: {error}"))?;
@@ -103,11 +102,11 @@ impl Config {
         self.agent_settings_mut(agent).reasoning = reasoning;
     }
 
-    pub fn instructions(&self) -> Option<&str> {
-        self.instructions.as_deref()
+    pub fn instructions(&self) -> &Instructions {
+        &self.instructions
     }
 
-    pub fn set_instructions(&mut self, instructions: Option<String>) {
+    pub fn set_instructions(&mut self, instructions: Instructions) {
         self.instructions = instructions;
     }
 
@@ -120,7 +119,7 @@ impl Config {
             .to_owned();
 
         let version = value.get("version").and_then(Value::as_u64).unwrap_or(1);
-        if version != 1 {
+        if !matches!(version, 1 | 2) {
             return Err(format!("ask config version {version} is not supported"));
         }
 
@@ -130,7 +129,11 @@ impl Config {
             .ok_or_else(|| "ask config is missing 'agents'".to_string())?;
         let mut config = Self {
             agent,
-            instructions: optional_string(value, "instructions")?,
+            instructions: Instructions::from_json(
+                value.get("instructions"),
+                version,
+                "instructions",
+            )?,
             ..Self::default()
         };
         config.load_agent_settings(values)?;
@@ -190,7 +193,8 @@ fn path() -> Result<PathBuf, String> {
 mod tests {
     use serde_json::json;
 
-    use super::{Config, DEFAULT_INSTRUCTIONS};
+    use super::Config;
+    use crate::instructions::Instructions;
 
     #[test]
     fn fast_codex_defaults_are_explicit() {
@@ -199,11 +203,11 @@ mod tests {
         assert_eq!(config.model("codex"), Some("fast"));
         assert_eq!(config.reasoning("codex"), Some("low"));
         assert_eq!(config.model("claude"), None);
-        assert_eq!(config.instructions(), Some(DEFAULT_INSTRUCTIONS));
+        assert_eq!(config.instructions(), &Instructions::Concise);
     }
 
     #[test]
-    fn v1_preserves_settings_for_every_harness() {
+    fn v1_preserves_agent_settings_and_resets_instruction_strings() {
         let config = Config::from_value(&json!({
             "version": 1,
             "agent": "pi",
@@ -220,7 +224,7 @@ mod tests {
         assert_eq!(config.reasoning("codex"), Some("high"));
         assert_eq!(config.model("pi"), Some("fast"));
         assert_eq!(config.reasoning("pi"), None);
-        assert_eq!(config.instructions(), Some("Use examples."));
+        assert_eq!(config.instructions(), &Instructions::Concise);
     }
 
     #[test]
@@ -233,6 +237,30 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(disabled.instructions(), None);
+        assert_eq!(disabled.instructions(), &Instructions::AgentDefault);
+    }
+
+    #[test]
+    fn v2_uses_explicit_instruction_modes() {
+        let previous_default = Config::from_value(&json!({
+            "version": 2,
+            "agent": "codex",
+            "instructions": "concise",
+            "agents": {}
+        }))
+        .unwrap();
+        let custom = Config::from_value(&json!({
+            "version": 2,
+            "agent": "codex",
+            "instructions": { "custom": "Answer like a pirate." },
+            "agents": {}
+        }))
+        .unwrap();
+
+        assert_eq!(previous_default.instructions(), &Instructions::Concise);
+        assert_eq!(
+            custom.instructions(),
+            &Instructions::Custom("Answer like a pirate.".into())
+        );
     }
 }

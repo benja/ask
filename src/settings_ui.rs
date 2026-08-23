@@ -8,8 +8,9 @@ use crossterm::execute;
 use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal::{Clear, ClearType};
 
-use crate::config::{Config, DEFAULT_INSTRUCTIONS};
+use crate::config::Config;
 use crate::harness::{self, Model, ReasoningControl};
+use crate::instructions::Instructions;
 use crate::select::{self, Choice, Item};
 
 #[derive(Default)]
@@ -33,9 +34,13 @@ pub fn run_defaults(config: &mut Config, cache: &mut Cache) -> Result<(), String
     defaults_menu(config, cache)
 }
 
-pub fn run_session(settings: &mut crate::Settings, cache: &mut Cache) -> Result<(), String> {
+pub fn run_session(
+    settings: &mut crate::Settings,
+    config: &mut Config,
+    cache: &mut Cache,
+) -> Result<(), String> {
     let _screen = select::Screen::enter()?;
-    session_menu(settings, cache)
+    session_menu(settings, config, cache)
 }
 
 fn defaults_menu(config: &mut Config, cache: &mut Cache) -> Result<(), String> {
@@ -56,7 +61,12 @@ fn defaults_menu(config: &mut Config, cache: &mut Cache) -> Result<(), String> {
             Item::new("Done", "Exit settings"),
         ];
 
-        match choose("Settings", "Defaults for new sessions", &items, selected)? {
+        match choose(
+            "Settings",
+            "Defaults and answer instructions",
+            &items,
+            selected,
+        )? {
             Choice::Selected(index) => {
                 selected = index;
                 match index {
@@ -85,7 +95,11 @@ fn defaults_menu(config: &mut Config, cache: &mut Cache) -> Result<(), String> {
     }
 }
 
-fn session_menu(settings: &mut crate::Settings, cache: &mut Cache) -> Result<(), String> {
+fn session_menu(
+    settings: &mut crate::Settings,
+    config: &mut Config,
+    cache: &mut Cache,
+) -> Result<(), String> {
     let mut selected = 1;
     loop {
         let definition = harness::resolve(&settings.agent)?;
@@ -105,11 +119,16 @@ fn session_menu(settings: &mut crate::Settings, cache: &mut Cache) -> Result<(),
             ),
             Item::new("Model", settings.model.as_deref().unwrap_or("Default")),
             Item::new("Reasoning", reasoning),
-            Item::new("Instructions", instructions_name(settings)),
+            Item::new("Instructions", instructions_name(config)),
             Item::new("Done", "Return to your session"),
         ];
 
-        match choose("Session settings", "Only this session", &items, selected)? {
+        match choose(
+            "Session settings",
+            "Model and reasoning apply only to this session",
+            &items,
+            selected,
+        )? {
             Choice::Selected(index) => {
                 selected = index;
                 match index {
@@ -128,7 +147,7 @@ fn session_menu(settings: &mut crate::Settings, cache: &mut Cache) -> Result<(),
                             show_message("Reasoning", explanation)?
                         }
                     },
-                    3 => select_instructions(settings)?,
+                    3 => select_instructions(config)?,
                     _ => return Ok(()),
                 }
             }
@@ -141,10 +160,8 @@ trait EditableSettings {
     fn agent(&self) -> &str;
     fn model(&self) -> Option<&str>;
     fn reasoning(&self) -> Option<&str>;
-    fn instructions(&self) -> Option<&str>;
     fn set_model(&mut self, model: Option<String>);
     fn set_reasoning(&mut self, reasoning: Option<String>);
-    fn set_instructions(&mut self, instructions: Option<String>);
     fn save(&self) -> Result<(), String>;
 }
 
@@ -161,10 +178,6 @@ impl EditableSettings for Config {
         Config::reasoning(self, &self.agent)
     }
 
-    fn instructions(&self) -> Option<&str> {
-        Config::instructions(self)
-    }
-
     fn set_model(&mut self, model: Option<String>) {
         let agent = self.agent.clone();
         Config::set_model(self, &agent, model);
@@ -173,10 +186,6 @@ impl EditableSettings for Config {
     fn set_reasoning(&mut self, reasoning: Option<String>) {
         let agent = self.agent.clone();
         Config::set_reasoning(self, &agent, reasoning);
-    }
-
-    fn set_instructions(&mut self, instructions: Option<String>) {
-        Config::set_instructions(self, instructions);
     }
 
     fn save(&self) -> Result<(), String> {
@@ -197,10 +206,6 @@ impl EditableSettings for crate::Settings {
         self.reasoning.as_deref()
     }
 
-    fn instructions(&self) -> Option<&str> {
-        self.instructions.as_deref()
-    }
-
     fn set_model(&mut self, model: Option<String>) {
         self.model = model;
     }
@@ -209,33 +214,29 @@ impl EditableSettings for crate::Settings {
         self.reasoning = reasoning;
     }
 
-    fn set_instructions(&mut self, instructions: Option<String>) {
-        self.instructions = instructions;
-    }
-
     fn save(&self) -> Result<(), String> {
         Ok(())
     }
 }
 
-fn instructions_name(settings: &impl EditableSettings) -> &'static str {
-    match settings.instructions() {
-        Some(DEFAULT_INSTRUCTIONS) => "Concise",
-        Some(_) => "Custom",
-        None => "Agent default",
+fn instructions_name(config: &Config) -> &'static str {
+    match config.instructions() {
+        Instructions::Concise => "Concise",
+        Instructions::Custom(_) => "Custom",
+        Instructions::AgentDefault => "Agent default",
     }
 }
 
-fn select_instructions(settings: &mut impl EditableSettings) -> Result<(), String> {
+fn select_instructions(config: &mut Config) -> Result<(), String> {
     let items = [
-        Item::new("Concise", "Short, direct answers"),
+        Item::new("Concise", "Friendly, direct answers"),
         Item::new("Agent default", "Do not add ask instructions"),
-        Item::new("Custom…", "Write a one-line instruction"),
+        Item::new("Custom…", "Write your own instructions"),
     ];
-    let selected = match settings.instructions() {
-        Some(DEFAULT_INSTRUCTIONS) => 0,
-        None => 1,
-        Some(_) => 2,
+    let selected = match config.instructions() {
+        Instructions::Concise => 0,
+        Instructions::AgentDefault => 1,
+        Instructions::Custom(_) => 2,
     };
     let Choice::Selected(index) = choose(
         "Instructions",
@@ -248,14 +249,11 @@ fn select_instructions(settings: &mut impl EditableSettings) -> Result<(), Strin
     };
 
     match index {
-        0 => settings.set_instructions(Some(DEFAULT_INSTRUCTIONS.into())),
-        1 => settings.set_instructions(None),
+        0 => config.set_instructions(Instructions::Concise),
+        1 => config.set_instructions(Instructions::AgentDefault),
         _ => {
-            let initial = settings
-                .instructions()
-                .filter(|instructions| *instructions != DEFAULT_INSTRUCTIONS)
-                .unwrap_or_default();
-            let Some(instructions) = crate::prompt::edit_line("Custom instructions", initial)?
+            let initial = config.instructions().custom().unwrap_or_default();
+            let Some(instructions) = crate::prompt::edit_text("Custom instructions", initial)?
             else {
                 return Ok(());
             };
@@ -264,10 +262,10 @@ fn select_instructions(settings: &mut impl EditableSettings) -> Result<(), Strin
                 show_message("Instructions", "Custom instructions cannot be empty.")?;
                 return Ok(());
             }
-            settings.set_instructions(Some(instructions.to_owned()));
+            config.set_instructions(Instructions::Custom(instructions.to_owned()));
         }
     }
-    settings.save()
+    config.save()
 }
 
 fn select_agent(config: &mut Config) -> Result<(), String> {

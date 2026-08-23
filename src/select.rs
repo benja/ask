@@ -1,7 +1,10 @@
 use std::io::{self, Write};
 
 use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal::{
@@ -9,6 +12,8 @@ use crossterm::terminal::{
     enable_raw_mode, size,
 };
 use unicode_width::UnicodeWidthStr;
+
+use crate::terminal::keyboard_enhancement_flags;
 
 const DEFAULT_LABEL_WIDTH: usize = 18;
 
@@ -340,7 +345,20 @@ pub struct Screen;
 impl Screen {
     pub fn enter() -> Result<Self, String> {
         enable_raw_mode().map_err(|error| format!("could not open menu: {error}"))?;
-        if let Err(error) = execute!(io::stderr(), EnterAlternateScreen, Hide) {
+        if let Err(error) = execute!(
+            io::stderr(),
+            EnterAlternateScreen,
+            Hide,
+            EnableBracketedPaste,
+            PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+        ) {
+            let _ = execute!(
+                io::stderr(),
+                PopKeyboardEnhancementFlags,
+                DisableBracketedPaste,
+                Show,
+                LeaveAlternateScreen
+            );
             let _ = disable_raw_mode();
             return Err(format!("could not open menu: {error}"));
         }
@@ -350,7 +368,13 @@ impl Screen {
 
 impl Drop for Screen {
     fn drop(&mut self) {
-        let _ = execute!(io::stderr(), Show, LeaveAlternateScreen);
+        let _ = execute!(
+            io::stderr(),
+            PopKeyboardEnhancementFlags,
+            DisableBracketedPaste,
+            Show,
+            LeaveAlternateScreen
+        );
         let _ = disable_raw_mode();
     }
 }
