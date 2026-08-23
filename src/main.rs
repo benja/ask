@@ -316,7 +316,50 @@ fn sessions() -> Result<(), String> {
         return list_sessions(&sessions);
     }
 
-    let items = sessions
+    let (selected, deleted_all) = {
+        let _screen = select::Screen::enter()?;
+        let mut initial = 0;
+        loop {
+            let items = session_items(&sessions);
+            match select::choose_deletable(
+                "Sessions",
+                "Choose a session to continue",
+                &items,
+                initial,
+                SESSION_NAME_WIDTH,
+            )? {
+                select::DeletableChoice::Selected(index) => break (Some(index), false),
+                select::DeletableChoice::Deleted(index) => {
+                    state::delete(&sessions[index])?;
+                    sessions.remove(index);
+                    let Some(next) = selection_after_delete(index, sessions.len()) else {
+                        break (None, true);
+                    };
+                    initial = next;
+                }
+                select::DeletableChoice::Cancelled => break (None, false),
+            }
+        }
+    };
+    if deleted_all {
+        write_stdout(&[b"No saved sessions.\n"])?;
+    }
+    let Some(selected) = selected else {
+        return Ok(());
+    };
+
+    let session = sessions.remove(selected);
+    let config = config::Config::load()?;
+    let settings = settings(Some(&session.agent), &config, Some(&session))?;
+    run_interactive(settings, Some(session))
+}
+
+fn selection_after_delete(deleted: usize, remaining: usize) -> Option<usize> {
+    (remaining > 0).then(|| deleted.min(remaining - 1))
+}
+
+fn session_items(sessions: &[state::Session]) -> Vec<select::Item> {
+    sessions
         .iter()
         .map(|session| {
             let question = session
@@ -337,28 +380,7 @@ fn sessions() -> Result<(), String> {
                 ),
             )
         })
-        .collect::<Vec<_>>();
-    let selected = {
-        let _screen = select::Screen::enter()?;
-        match select::choose_with_min_label_width(
-            "Sessions",
-            "Choose a session to continue",
-            &items,
-            0,
-            SESSION_NAME_WIDTH,
-        )? {
-            select::Choice::Selected(index) => Some(index),
-            select::Choice::Cancelled => None,
-        }
-    };
-    let Some(selected) = selected else {
-        return Ok(());
-    };
-
-    let session = sessions.remove(selected);
-    let config = config::Config::load()?;
-    let settings = settings(Some(&session.agent), &config, Some(&session))?;
-    run_interactive(settings, Some(session))
+        .collect()
 }
 
 fn list_sessions(sessions: &[state::Session]) -> Result<(), String> {
@@ -501,7 +523,7 @@ fn write_stdout(parts: &[&[u8]]) -> Result<(), String> {
 mod tests {
     use std::path::Path;
 
-    use super::{preview, settings};
+    use super::{preview, selection_after_delete, settings};
     use crate::config::Config;
     use crate::state::{Session, SessionSettings};
 
@@ -509,6 +531,13 @@ mod tests {
     fn session_preview_is_single_line_and_truncated() {
         assert_eq!(preview("one\n  two", 20), "one two");
         assert_eq!(preview("abcdefgh", 4), "abcd…");
+    }
+
+    #[test]
+    fn deletion_selects_the_nearest_remaining_session() {
+        assert_eq!(selection_after_delete(1, 3), Some(1));
+        assert_eq!(selection_after_delete(3, 3), Some(2));
+        assert_eq!(selection_after_delete(0, 0), None);
     }
 
     #[test]

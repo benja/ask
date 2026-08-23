@@ -134,6 +134,16 @@ pub fn save(session: &Session) -> Result<(), String> {
     storage::write_private(&destination, &bytes, "session")
 }
 
+pub fn delete(session: &Session) -> Result<(), String> {
+    delete_from(&directory()?, session)
+}
+
+fn delete_from(directory: &Path, session: &Session) -> Result<(), String> {
+    let path = directory.join(format!("{}.json", file_key(&session.harness_session_id)));
+    fs::remove_file(&path)
+        .map_err(|error| format!("could not delete session '{}': {error}", path.display()))
+}
+
 pub fn latest(cwd: &Path) -> Result<Session, String> {
     let cwd = cwd.to_string_lossy();
     load_all()?
@@ -205,7 +215,34 @@ fn optional_string(value: &Value, key: &str) -> Result<Option<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Session, SessionSettings, Turn};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{Session, SessionSettings, Turn, delete_from, file_key};
+
+    #[test]
+    fn deleting_a_session_removes_only_its_file() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("ask-delete-test-{}-{unique}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+
+        let deleted = Session::new("codex", "delete-me".into(), &directory);
+        let kept = Session::new("codex", "keep-me".into(), &directory);
+        let deleted_path = directory.join(format!("{}.json", file_key("delete-me")));
+        let kept_path = directory.join(format!("{}.json", file_key(&kept.harness_session_id)));
+        fs::write(&deleted_path, b"deleted").unwrap();
+        fs::write(&kept_path, b"kept").unwrap();
+
+        delete_from(&directory, &deleted).unwrap();
+
+        assert!(!deleted_path.exists());
+        assert!(kept_path.exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn session_round_trips_through_json() {

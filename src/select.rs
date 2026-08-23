@@ -41,34 +41,96 @@ pub enum Choice {
     Cancelled,
 }
 
+pub enum DeletableChoice {
+    Selected(usize),
+    Deleted(usize),
+    Cancelled,
+}
+
+enum MenuChoice {
+    Selected(usize),
+    Deleted(usize),
+    Cancelled,
+}
+
+#[derive(Clone, Copy)]
+enum DeleteState {
+    Disabled,
+    Ready,
+    Confirming,
+}
+
+enum DeleteKey {
+    Ignored,
+    Consumed,
+    Confirmed,
+}
+
 pub fn choose(
     title: &str,
     subtitle: &str,
     items: &[Item],
     initial: usize,
 ) -> Result<Choice, String> {
-    choose_with_min_label_width(title, subtitle, items, initial, DEFAULT_LABEL_WIDTH)
+    match choose_inner(title, subtitle, items, initial, DEFAULT_LABEL_WIDTH, false)? {
+        MenuChoice::Selected(index) => Ok(Choice::Selected(index)),
+        MenuChoice::Cancelled => Ok(Choice::Cancelled),
+        MenuChoice::Deleted(_) => unreachable!("deletion is disabled"),
+    }
 }
 
-pub fn choose_with_min_label_width(
+pub fn choose_deletable(
     title: &str,
     subtitle: &str,
     items: &[Item],
     initial: usize,
     label_width: usize,
-) -> Result<Choice, String> {
+) -> Result<DeletableChoice, String> {
+    match choose_inner(title, subtitle, items, initial, label_width, true)? {
+        MenuChoice::Selected(index) => Ok(DeletableChoice::Selected(index)),
+        MenuChoice::Deleted(index) => Ok(DeletableChoice::Deleted(index)),
+        MenuChoice::Cancelled => Ok(DeletableChoice::Cancelled),
+    }
+}
+
+fn choose_inner(
+    title: &str,
+    subtitle: &str,
+    items: &[Item],
+    initial: usize,
+    label_width: usize,
+    deletable: bool,
+) -> Result<MenuChoice, String> {
     debug_assert!(!items.is_empty());
     debug_assert!(items.iter().any(|item| item.selectable));
     let mut selected = selectable_at_or_after(items, initial.min(items.len() - 1));
     let mut offset = initial_offset(selected, items.len());
+    let mut delete_state = if deletable {
+        DeleteState::Ready
+    } else {
+        DeleteState::Disabled
+    };
     loop {
-        draw(title, subtitle, items, selected, offset, label_width)?;
+        draw(
+            title,
+            subtitle,
+            items,
+            selected,
+            offset,
+            label_width,
+            delete_state,
+        )?;
         let Event::Key(KeyEvent {
             code, modifiers, ..
         }) = event::read().map_err(|error| format!("could not read menu input: {error}"))?
         else {
             continue;
         };
+        match handle_delete_key(&mut delete_state, code) {
+            DeleteKey::Confirmed => return Ok(MenuChoice::Deleted(selected)),
+            DeleteKey::Consumed => continue,
+            DeleteKey::Ignored => {}
+        }
         match code {
             KeyCode::Up | KeyCode::Char('k') => {
                 selected = move_selection(items, selected, false);
@@ -76,14 +138,30 @@ pub fn choose_with_min_label_width(
             KeyCode::Down | KeyCode::Char('j') => {
                 selected = move_selection(items, selected, true);
             }
-            KeyCode::Enter => return Ok(Choice::Selected(selected)),
-            KeyCode::Esc | KeyCode::Char('q') => return Ok(Choice::Cancelled),
+            KeyCode::Enter => return Ok(MenuChoice::Selected(selected)),
+            KeyCode::Esc | KeyCode::Char('q') => return Ok(MenuChoice::Cancelled),
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                return Ok(Choice::Cancelled);
+                return Ok(MenuChoice::Cancelled);
             }
             _ => {}
         }
         offset = keep_visible(selected, offset, items.len());
+    }
+}
+
+fn handle_delete_key(state: &mut DeleteState, code: KeyCode) -> DeleteKey {
+    match (*state, code) {
+        (DeleteState::Ready, KeyCode::Char('d')) => {
+            *state = DeleteState::Confirming;
+            DeleteKey::Consumed
+        }
+        (DeleteState::Confirming, KeyCode::Enter) => DeleteKey::Confirmed,
+        (DeleteState::Confirming, KeyCode::Esc) => {
+            *state = DeleteState::Ready;
+            DeleteKey::Consumed
+        }
+        (DeleteState::Confirming, _) => DeleteKey::Consumed,
+        _ => DeleteKey::Ignored,
     }
 }
 
@@ -94,6 +172,7 @@ fn draw(
     selected: usize,
     offset: usize,
     label_width: usize,
+    delete_state: DeleteState,
 ) -> Result<(), String> {
     let mut output = io::stderr();
     execute!(
@@ -144,7 +223,12 @@ fn draw(
         execute!(output, Print(format!("\r\n    {status}\r\n")))
             .map_err(|error| format!("could not draw menu: {error}"))?;
     }
-    execute!(output, Print("\r\n↑/↓ move  enter select  esc back"))
+    let help = match delete_state {
+        DeleteState::Confirming => "Delete this saved session?  enter delete  esc cancel",
+        DeleteState::Ready => "↑/↓ move  enter continue  d delete  esc back",
+        DeleteState::Disabled => "↑/↓ move  enter select  esc back",
+    };
+    execute!(output, Print("\r\n"), Print(help))
         .and_then(|()| output.flush())
         .map_err(|error| format!("could not draw menu: {error}"))
 }
@@ -213,8 +297,34 @@ impl Drop for Screen {
 #[cfg(test)]
 mod tests {
     use super::{
-        Item, initial_offset, item_line, keep_visible, move_selection, selectable_at_or_after,
+        DeleteKey, DeleteState, Item, handle_delete_key, initial_offset, item_line, keep_visible,
+        move_selection, selectable_at_or_after,
     };
+    use crossterm::event::KeyCode;
+
+    #[test]
+    fn delete_requires_confirmation_and_escape_cancels_it() {
+        let mut state = DeleteState::Ready;
+        assert!(matches!(
+            handle_delete_key(&mut state, KeyCode::Char('d')),
+            DeleteKey::Consumed
+        ));
+        assert!(matches!(state, DeleteState::Confirming));
+        assert!(matches!(
+            handle_delete_key(&mut state, KeyCode::Esc),
+            DeleteKey::Consumed
+        ));
+        assert!(matches!(state, DeleteState::Ready));
+    }
+
+    #[test]
+    fn enter_confirms_a_pending_delete() {
+        let mut state = DeleteState::Confirming;
+        assert!(matches!(
+            handle_delete_key(&mut state, KeyCode::Enter),
+            DeleteKey::Confirmed
+        ));
+    }
 
     #[test]
     fn short_lists_do_not_scroll() {
