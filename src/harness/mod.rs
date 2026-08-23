@@ -1,5 +1,7 @@
 mod claude;
 mod codex;
+mod cursor;
+mod grok;
 mod opencode;
 mod pi;
 
@@ -67,12 +69,13 @@ pub struct Definition {
     pub default_reasoning: Option<&'static str>,
     pub reasoning: ReasoningControl,
     program_env: &'static str,
+    default_program: &'static str,
     create: fn(OsString) -> Box<dyn Harness>,
 }
 
 impl Definition {
     fn program(&self) -> OsString {
-        std::env::var_os(self.program_env).unwrap_or_else(|| self.id.into())
+        std::env::var_os(self.program_env).unwrap_or_else(|| self.default_program.into())
     }
 
     pub fn is_available(&self) -> bool {
@@ -94,6 +97,7 @@ pub static DEFINITIONS: &[Definition] = &[
         default_reasoning: Some("low"),
         reasoning: ReasoningControl::Selectable,
         program_env: "ASK_CODEX_BIN",
+        default_program: "codex",
         create: |program| Box::new(codex::Codex::new(program)),
     },
     Definition {
@@ -108,6 +112,7 @@ pub static DEFINITIONS: &[Definition] = &[
             explanation: "Claude Code manages reasoning automatically for its selected model.",
         },
         program_env: "ASK_CLAUDE_BIN",
+        default_program: "claude",
         create: |program| Box::new(claude::Claude::new(program)),
     },
     Definition {
@@ -122,6 +127,7 @@ pub static DEFINITIONS: &[Definition] = &[
             explanation: "OpenCode manages reasoning through model-specific variants.",
         },
         program_env: "ASK_OPENCODE_BIN",
+        default_program: "opencode",
         create: |program| Box::new(opencode::OpenCode::new(program)),
     },
     Definition {
@@ -133,7 +139,35 @@ pub static DEFINITIONS: &[Definition] = &[
         default_reasoning: None,
         reasoning: ReasoningControl::Selectable,
         program_env: "ASK_PI_BIN",
+        default_program: "pi",
         create: |program| Box::new(pi::Pi::new(program)),
+    },
+    Definition {
+        id: "cursor",
+        aliases: &["cursor-agent"],
+        name: "Cursor",
+        description: "Cursor Agent CLI",
+        default_model: None,
+        default_reasoning: None,
+        reasoning: ReasoningControl::Managed {
+            label: "Managed by Cursor",
+            explanation: "Cursor manages model selection and reasoning for its supported models.",
+        },
+        program_env: "ASK_CURSOR_BIN",
+        default_program: "cursor-agent",
+        create: |program| Box::new(cursor::Cursor::new(program)),
+    },
+    Definition {
+        id: "grok",
+        aliases: &["grok-cli"],
+        name: "Grok",
+        description: "xAI Grok Build",
+        default_model: None,
+        default_reasoning: None,
+        reasoning: ReasoningControl::Selectable,
+        program_env: "ASK_GROK_BIN",
+        default_program: "grok",
+        create: |program| Box::new(grok::Grok::new(program)),
     },
 ];
 
@@ -203,6 +237,11 @@ mod tests {
         assert_eq!(resolve("codex").unwrap().id, "codex");
         assert_eq!(resolve("claude-code").unwrap().id, "claude");
         assert_eq!(resolve("open-code").unwrap().id, "opencode");
+        assert_eq!(resolve("cursor").unwrap().id, "cursor");
+        assert_eq!(resolve("cursor").unwrap().default_program, "cursor-agent");
+        assert_eq!(resolve("cursor-agent").unwrap().id, "cursor");
+        assert_eq!(resolve("grok").unwrap().id, "grok");
+        assert_eq!(resolve("grok-cli").unwrap().id, "grok");
         assert!(resolve("missing").is_err());
     }
 }
