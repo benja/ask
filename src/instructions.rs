@@ -1,5 +1,7 @@
 use serde_json::{Value, json};
 
+use crate::error::{Error, Result};
+
 pub const CONCISE_INSTRUCTIONS: &str = concat!(
     "Be friendly, direct, conversational, and concise. Lead with the answer and stop once it is clear. ",
     "Use recent context to interpret typos and corrections. ",
@@ -40,23 +42,26 @@ impl Instructions {
         }
     }
 
-    pub fn from_json(value: Option<&Value>, version: u64, field: &str) -> Result<Self, String> {
+    pub fn from_json(value: Option<&Value>, version: u64, field: &str) -> Result<Self> {
         match version {
             1 => Self::from_v1_json(value, field),
             2 => Self::from_v2_json(value, field),
-            _ => Err(format!("version {version} is not supported")),
+            _ => Err(Error::new(
+                format!("instruction version {version} is not supported"),
+                "run 'ask --upgrade'",
+            )),
         }
     }
 
-    fn from_v1_json(value: Option<&Value>, field: &str) -> Result<Self, String> {
+    fn from_v1_json(value: Option<&Value>, field: &str) -> Result<Self> {
         match value {
             None | Some(Value::Null) => Ok(Self::AgentDefault),
             Some(Value::String(_)) => Ok(Self::Concise),
-            Some(_) => Err(format!("invalid '{field}'")),
+            Some(_) => Err(invalid_instructions(field)),
         }
     }
 
-    fn from_v2_json(value: Option<&Value>, field: &str) -> Result<Self, String> {
+    fn from_v2_json(value: Option<&Value>, field: &str) -> Result<Self> {
         match value {
             None => Ok(Self::Concise),
             Some(Value::Null) => Ok(Self::AgentDefault),
@@ -70,9 +75,16 @@ impl Instructions {
                     value["custom"].as_str().unwrap_or_default().to_owned(),
                 ))
             }
-            Some(_) => Err(format!("invalid '{field}'")),
+            Some(_) => Err(invalid_instructions(field)),
         }
     }
+}
+
+fn invalid_instructions(field: &str) -> Error {
+    Error::new(
+        format!("config has invalid '{field}'"),
+        "fix or remove the config file, then try again",
+    )
 }
 
 #[cfg(test)]

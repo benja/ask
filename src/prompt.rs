@@ -10,6 +10,7 @@ use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size};
 use unicode_width::UnicodeWidthStr;
 
+use crate::error::{Error, Result};
 use crate::terminal::keyboard_enhancement_flags;
 
 const COMMANDS: &[Command] = &[Command {
@@ -30,7 +31,7 @@ pub enum Input {
 pub struct Prompt;
 
 impl Prompt {
-    pub fn read() -> Result<Input, String> {
+    pub fn read() -> Result<Input> {
         let _terminal = TerminalInput::enter()?;
         let mut output = io::stderr();
         let mut line = String::new();
@@ -58,7 +59,7 @@ impl Prompt {
             )?;
             rendered_suggestions = suggestions.len();
 
-            match event::read().map_err(|error| format!("could not read input: {error}"))? {
+            match event::read().map_err(|error| Error::terminal("could not read input", error))? {
                 Event::Paste(value) => {
                     let value = value.replace("\r\n", "\n").replace('\r', "\n");
                     line.insert_str(cursor, &value);
@@ -91,7 +92,9 @@ impl Prompt {
                             Input::Line(_) | Input::Eof => {
                                 execute!(output, Print("\r\n"))
                                     .and_then(|()| output.flush())
-                                    .map_err(|error| format!("could not write prompt: {error}"))?;
+                                    .map_err(|error| {
+                                        Error::terminal("could not write prompt", error)
+                                    })?;
                             }
                         }
                         return Ok(input);
@@ -103,28 +106,28 @@ impl Prompt {
     }
 }
 
-pub fn write_submitted(line: &str) -> Result<(), String> {
+pub fn write_submitted(line: &str) -> Result<()> {
     let mut output = io::stderr();
     draw_submitted(&mut output, line)
 }
 
-fn redraw_submitted(output: &mut impl Write, line: &str) -> Result<(), String> {
+fn redraw_submitted(output: &mut impl Write, line: &str) -> Result<()> {
     let terminal_width = usize::from(size().map_or(80, |(width, _)| width).max(1));
     let row = cursor_position(line, line.len(), terminal_width).0;
     if row > 0 {
         execute!(output, MoveUp(u16::try_from(row).unwrap_or(u16::MAX)))
-            .map_err(|error| format!("could not draw submitted message: {error}"))?;
+            .map_err(|error| Error::terminal("could not draw submitted message", error))?;
     }
     execute!(output, MoveToColumn(0), Clear(ClearType::FromCursorDown))
-        .map_err(|error| format!("could not draw submitted message: {error}"))?;
+        .map_err(|error| Error::terminal("could not draw submitted message", error))?;
     draw_submitted(output, line)
 }
 
-fn draw_submitted(output: &mut impl Write, line: &str) -> Result<(), String> {
+fn draw_submitted(output: &mut impl Write, line: &str) -> Result<()> {
     for (index, logical_line) in line.split('\n').enumerate() {
         if index > 0 {
             execute!(output, Print("\r\n"))
-                .map_err(|error| format!("could not draw submitted message: {error}"))?;
+                .map_err(|error| Error::terminal("could not draw submitted message", error))?;
         }
         execute!(
             output,
@@ -133,16 +136,16 @@ fn draw_submitted(output: &mut impl Write, line: &str) -> Result<(), String> {
             Print(logical_line),
             SetAttribute(Attribute::Reset)
         )
-        .map_err(|error| format!("could not draw submitted message: {error}"))?;
+        .map_err(|error| Error::terminal("could not draw submitted message", error))?;
     }
     execute!(output, Print("\r\n\r\n"))
         .and_then(|()| output.flush())
-        .map_err(|error| format!("could not draw submitted message: {error}"))
+        .map_err(|error| Error::terminal("could not draw submitted message", error))
 }
 
-pub fn edit_text(title: &str, initial: &str) -> Result<Option<String>, String> {
+pub fn edit_text(title: &str, initial: &str) -> Result<Option<String>> {
     let mut output = io::stderr();
-    execute!(output, Show).map_err(|error| format!("could not show text input: {error}"))?;
+    execute!(output, Show).map_err(|error| Error::terminal("could not show text input", error))?;
     let _cursor = HideCursor;
     let mut text = initial.to_owned();
     let mut cursor = text.len();
@@ -152,7 +155,7 @@ pub fn edit_text(title: &str, initial: &str) -> Result<Option<String>, String> {
     loop {
         draw_text_editor(&mut output, title, &text, cursor)?;
 
-        match event::read().map_err(|error| format!("could not read text input: {error}"))? {
+        match event::read().map_err(|error| Error::terminal("could not read text input", error))? {
             Event::Paste(value) => {
                 let value = value.replace("\r\n", "\n").replace('\r', "\n");
                 text.insert_str(cursor, &value);
@@ -179,12 +182,7 @@ pub fn edit_text(title: &str, initial: &str) -> Result<Option<String>, String> {
     }
 }
 
-fn draw_text_editor(
-    output: &mut impl Write,
-    title: &str,
-    text: &str,
-    cursor: usize,
-) -> Result<(), String> {
+fn draw_text_editor(output: &mut impl Write, title: &str, text: &str, cursor: usize) -> Result<()> {
     let width = usize::from(size().map_or(80, |(width, _)| width).max(1));
     let (cursor_row, cursor_column) = cursor_position(text, cursor, width);
 
@@ -203,7 +201,7 @@ fn draw_text_editor(
         )
     )
     .and_then(|()| output.flush())
-    .map_err(|error| format!("could not draw text input: {error}"))
+    .map_err(|error| Error::terminal("could not draw text input", error))
 }
 
 struct HideCursor;
@@ -321,7 +319,7 @@ fn draw(
     selected: usize,
     previous_count: usize,
     previous_cursor_row: usize,
-) -> Result<usize, String> {
+) -> Result<usize> {
     let terminal_width = usize::from(size().map_or(80, |(width, _)| width).max(1));
     let rows = previous_count.max(suggestions.len());
     if previous_cursor_row > 0 {
@@ -329,7 +327,7 @@ fn draw(
             output,
             MoveUp(u16::try_from(previous_cursor_row).unwrap_or(u16::MAX))
         )
-        .map_err(|error| format!("could not draw prompt: {error}"))?;
+        .map_err(|error| Error::terminal("could not draw prompt", error))?;
     }
     execute!(
         output,
@@ -338,11 +336,11 @@ fn draw(
         Print("> "),
         Print(line.replace('\n', "\r\n"))
     )
-    .map_err(|error| format!("could not draw prompt: {error}"))?;
+    .map_err(|error| Error::terminal("could not draw prompt", error))?;
 
     for index in 0..rows {
         execute!(output, Print("\r\n"), Clear(ClearType::CurrentLine))
-            .map_err(|error| format!("could not draw prompt: {error}"))?;
+            .map_err(|error| Error::terminal("could not draw prompt", error))?;
         if let Some(command) = suggestions.get(index) {
             if index == selected {
                 execute!(
@@ -360,13 +358,13 @@ fn draw(
                     Print(format!("    {:<12} {}", command.name, command.description))
                 )
             }
-            .map_err(|error| format!("could not draw prompt: {error}"))?;
+            .map_err(|error| Error::terminal("could not draw prompt", error))?;
         }
     }
 
     if rows > 0 {
         execute!(output, MoveUp(u16::try_from(rows).unwrap_or(u16::MAX)))
-            .map_err(|error| format!("could not draw prompt: {error}"))?;
+            .map_err(|error| Error::terminal("could not draw prompt", error))?;
     }
     let (cursor_row, column) = cursor_position(line, cursor, terminal_width);
     let end_row = cursor_position(line, line.len(), terminal_width)
@@ -377,14 +375,14 @@ fn draw(
             output,
             MoveUp(u16::try_from(end_row - cursor_row).unwrap_or(u16::MAX))
         )
-        .map_err(|error| format!("could not draw prompt: {error}"))?;
+        .map_err(|error| Error::terminal("could not draw prompt", error))?;
     }
     execute!(
         output,
         MoveToColumn(u16::try_from(column).unwrap_or(u16::MAX))
     )
     .and_then(|()| output.flush())
-    .map_err(|error| format!("could not draw prompt: {error}"))?;
+    .map_err(|error| Error::terminal("could not draw prompt", error))?;
     Ok(cursor_row)
 }
 
@@ -394,7 +392,7 @@ fn clear_suggestions(
     cursor: usize,
     previous_count: usize,
     previous_cursor_row: usize,
-) -> Result<(), String> {
+) -> Result<()> {
     draw(
         output,
         line,
@@ -471,17 +469,18 @@ fn delete_previous_word(line: &mut String, cursor: &mut usize) {
 struct TerminalInput;
 
 impl TerminalInput {
-    fn enter() -> Result<Self, String> {
-        enable_raw_mode().map_err(|error| format!("could not enable terminal input: {error}"))?;
+    fn enter() -> Result<Self> {
+        enable_raw_mode()
+            .map_err(|error| Error::terminal("could not enable terminal input", error))?;
         if let Err(error) = execute!(io::stderr(), EnableBracketedPaste) {
             let _ = disable_raw_mode();
-            return Err(format!("could not enable terminal paste: {error}"));
+            return Err(Error::terminal("could not enable terminal paste", error));
         }
         execute!(
             io::stderr(),
             PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
         )
-        .map_err(|error| format!("could not enable enhanced keyboard input: {error}"))?;
+        .map_err(|error| Error::terminal("could not enable enhanced keyboard input", error))?;
         Ok(Self)
     }
 }

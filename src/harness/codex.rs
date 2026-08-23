@@ -5,6 +5,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use serde_json::{Value, json};
 
 use super::{Harness, Model, ReasoningLevel, Response, RunOptions, executable_available};
+use crate::error::{Error, Result};
 
 const FAST_MODELS: &[&str] = &["gpt-5.3-codex-spark", "gpt-5.6-luna"];
 
@@ -26,7 +27,7 @@ impl Codex {
         executable_available(&program)
     }
 
-    fn server(&mut self) -> Result<&mut AppServer, String> {
+    fn server(&mut self) -> Result<&mut AppServer> {
         if self.server.is_none() {
             self.server = Some(AppServer::start(&self.program)?);
         }
@@ -35,7 +36,7 @@ impl Codex {
 }
 
 impl Harness for Codex {
-    fn models(&mut self) -> Result<Vec<Model>, String> {
+    fn models(&mut self) -> Result<Vec<Model>> {
         let mut models = self.server()?.models()?;
         if !models.iter().any(|model| model.id == "fast")
             && let Some(model) = fastest_model(&models).cloned()
@@ -60,8 +61,8 @@ impl Harness for Codex {
         question: &str,
         session_id: Option<&str>,
         options: RunOptions<'_>,
-        on_delta: &mut dyn FnMut(&str) -> Result<(), String>,
-    ) -> Result<Response, String> {
+        on_delta: &mut dyn FnMut(&str) -> Result<()>,
+    ) -> Result<Response> {
         self.server()?.ask(question, session_id, options, on_delta)
     }
 }
@@ -77,7 +78,7 @@ struct AppServer {
 }
 
 impl AppServer {
-    fn start(program: &OsStr) -> Result<Self, String> {
+    fn start(program: &OsStr) -> Result<Self> {
         let mut child = Command::new(program)
             .args(["app-server", "--stdio"])
             .stdin(Stdio::piped())
@@ -86,9 +87,15 @@ impl AppServer {
             .spawn()
             .map_err(|error| {
                 if error.kind() == std::io::ErrorKind::NotFound {
-                    "Codex is not installed or not on PATH; install it and run 'codex login'".into()
+                    Error::new(
+                        "Codex is not installed or not on PATH",
+                        "install it, run 'codex login', then try again",
+                    )
                 } else {
-                    format!("could not start Codex app server: {error}")
+                    Error::new(
+                        format!("could not start Codex app server: {error}"),
+                        "run 'codex' directly to check its setup, then try again",
+                    )
                 }
             })?;
 
@@ -125,8 +132,8 @@ impl AppServer {
         question: &str,
         session_id: Option<&str>,
         options: RunOptions<'_>,
-        on_delta: &mut dyn FnMut(&str) -> Result<(), String>,
-    ) -> Result<Response, String> {
+        on_delta: &mut dyn FnMut(&str) -> Result<()>,
+    ) -> Result<Response> {
         let model = if options.model == Some("fast") {
             Some(self.fast_model()?)
         } else {
@@ -178,12 +185,13 @@ impl AppServer {
                 Some("turn/completed") => {
                     let status = message["params"]["turn"]["status"].as_str();
                     if status != Some("completed") {
-                        return Err(reported_error.unwrap_or_else(|| {
+                        let message = reported_error.unwrap_or_else(|| {
                             format!(
                                 "Codex turn ended with status '{}'",
                                 status.unwrap_or("unknown")
                             )
-                        }));
+                        });
+                        return Err(Error::agent("codex", message));
                     }
                     break;
                 }
@@ -192,12 +200,18 @@ impl AppServer {
         }
 
         if let Some(error) = reported_error {
-            return Err(format!("Codex reported an error: {error}"));
+            return Err(Error::agent(
+                "codex",
+                format!("Codex reported an error: {error}"),
+            ));
         }
 
         let answer = final_answer.unwrap_or(streamed_answer);
         if answer.is_empty() {
-            return Err("Codex completed without returning an answer".into());
+            return Err(Error::new(
+                "Codex completed without returning an answer",
+                "update Codex and try again",
+            ));
         }
 
         Ok(Response {
@@ -206,7 +220,7 @@ impl AppServer {
         })
     }
 
-    fn fast_model(&mut self) -> Result<String, String> {
+    fn fast_model(&mut self) -> Result<String> {
         if let Some(model) = &self.resolved_fast_model {
             return Ok(model.clone());
         }
@@ -217,13 +231,17 @@ impl AppServer {
             "params": {"limit": 100, "includeHidden": false}
         }))?;
         let response = self.wait_for_response(request_id)?;
-        let model = select_fast_model(&response["result"]["data"])
-            .ok_or_else(|| "Codex did not report an available model".to_string())?;
+        let model = select_fast_model(&response["result"]["data"]).ok_or_else(|| {
+            Error::new(
+                "Codex did not report an available model",
+                "run 'codex login', then try again",
+            )
+        })?;
         self.resolved_fast_model = Some(model.clone());
         Ok(model)
     }
 
-    fn models(&mut self) -> Result<Vec<Model>, String> {
+    fn models(&mut self) -> Result<Vec<Model>> {
         let mut models = Vec::new();
         let mut cursor: Option<String> = None;
 
@@ -240,9 +258,12 @@ impl AppServer {
             }))?;
             let response = self.wait_for_response(id)?;
             let result = &response["result"];
-            let data = result["data"]
-                .as_array()
-                .ok_or_else(|| "Codex returned an invalid model list".to_string())?;
+            let data = result["data"].as_array().ok_or_else(|| {
+                Error::new(
+                    "Codex returned an invalid model list",
+                    "update Codex and try again",
+                )
+            })?;
 
             for value in data {
                 let id = required_string(value, "model", "model")?;
@@ -279,7 +300,10 @@ impl AppServer {
         }
 
         if models.is_empty() {
-            Err("Codex did not report any available models".into())
+            Err(Error::new(
+                "Codex did not report any available models",
+                "run 'codex login', then try again",
+            ))
         } else {
             Ok(models)
         }
@@ -289,7 +313,7 @@ impl AppServer {
         &mut self,
         requested: Option<&str>,
         instructions: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String> {
         if let Some(current) = &self.thread_id
             && requested == Some(current.as_str())
             && self.instructions.as_deref() == instructions
@@ -310,8 +334,12 @@ impl AppServer {
                 }
             })
         } else {
-            let cwd = std::env::current_dir()
-                .map_err(|error| format!("could not determine current directory: {error}"))?;
+            let cwd = std::env::current_dir().map_err(|error| {
+                Error::new(
+                    format!("could not determine current directory: {error}"),
+                    "change to an existing directory and try again",
+                )
+            })?;
             json!({
                 "method": "thread/start",
                 "id": id,
@@ -328,7 +356,12 @@ impl AppServer {
         let response = self.wait_for_response(id)?;
         let thread_id = response["result"]["thread"]["id"]
             .as_str()
-            .ok_or_else(|| "Codex did not return a thread ID".to_string())?
+            .ok_or_else(|| {
+                Error::new(
+                    "Codex did not return a thread ID",
+                    "update Codex and try again",
+                )
+            })?
             .to_owned();
         self.thread_id = Some(thread_id.clone());
         self.instructions = instructions.map(str::to_owned);
@@ -341,29 +374,43 @@ impl AppServer {
         id
     }
 
-    fn send(&mut self, message: &Value) -> Result<(), String> {
+    fn send(&mut self, message: &Value) -> Result<()> {
         serde_json::to_writer(&mut self.input, message)
-            .map_err(|error| format!("could not encode Codex request: {error}"))?;
+            .map_err(|error| Error::internal(format!("could not encode Codex request: {error}")))?;
         self.input
             .write_all(b"\n")
             .and_then(|()| self.input.flush())
-            .map_err(|error| format!("could not send request to Codex: {error}"))
+            .map_err(|error| {
+                Error::new(
+                    format!("could not send request to Codex: {error}"),
+                    "restart ask and try again",
+                )
+            })
     }
 
-    fn read(&mut self) -> Result<Value, String> {
+    fn read(&mut self) -> Result<Value> {
         let mut line = String::new();
-        let bytes = self
-            .output
-            .read_line(&mut line)
-            .map_err(|error| format!("could not read Codex response: {error}"))?;
+        let bytes = self.output.read_line(&mut line).map_err(|error| {
+            Error::new(
+                format!("could not read Codex response: {error}"),
+                "restart ask and try again",
+            )
+        })?;
         if bytes == 0 {
-            return Err("Codex app server stopped unexpectedly".into());
+            return Err(Error::new(
+                "Codex app server stopped unexpectedly",
+                "restart ask and try again",
+            ));
         }
-        serde_json::from_str(&line)
-            .map_err(|error| format!("could not parse Codex response: {error}"))
+        serde_json::from_str(&line).map_err(|error| {
+            Error::new(
+                format!("could not parse Codex response: {error}"),
+                "update Codex and try again",
+            )
+        })
     }
 
-    fn wait_for_response(&mut self, id: u64) -> Result<Value, String> {
+    fn wait_for_response(&mut self, id: u64) -> Result<Value> {
         loop {
             let message = self.read()?;
             if message.get("id").and_then(Value::as_u64) == Some(id) {
@@ -398,11 +445,13 @@ fn fastest_model(models: &[Model]) -> Option<&Model> {
         .or_else(|| models.first())
 }
 
-fn required_string(value: &Value, key: &str, name: &str) -> Result<String, String> {
-    value[key]
-        .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| format!("Codex returned a model without a {name}"))
+fn required_string(value: &Value, key: &str, name: &str) -> Result<String> {
+    value[key].as_str().map(str::to_owned).ok_or_else(|| {
+        Error::new(
+            format!("Codex returned a model without a {name}"),
+            "update Codex and try again",
+        )
+    })
 }
 
 impl Drop for AppServer {
@@ -412,16 +461,22 @@ impl Drop for AppServer {
     }
 }
 
-fn response_error(response: &Value) -> Result<(), String> {
+fn response_error(response: &Value) -> Result<()> {
     if let Some(error) = response.get("error") {
         let message = error
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("unknown protocol error");
         if message.starts_with("thread ") && message.ends_with(" already has an active writer") {
-            Err("this session is open in another process".into())
+            Err(Error::new(
+                "this session is open in another process",
+                "close the other ask process and try again",
+            ))
         } else {
-            Err(format!("Codex app server error: {message}"))
+            Err(Error::agent(
+                "codex",
+                format!("Codex app server error: {message}"),
+            ))
         }
     } else {
         Ok(())

@@ -4,19 +4,35 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub fn write_private(path: &Path, bytes: &[u8], subject: &str) -> Result<(), String> {
+use crate::error::{Error, Result};
+
+pub fn write_private(path: &Path, bytes: &[u8], subject: &str) -> Result<()> {
     let directory = path
         .parent()
-        .ok_or_else(|| format!("invalid {subject} path"))?;
-    fs::create_dir_all(directory)
-        .map_err(|error| format!("could not create {subject} directory: {error}"))?;
-    fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
-        .map_err(|error| format!("could not secure {subject} directory: {error}"))?;
+        .ok_or_else(|| Error::internal(format!("invalid {subject} path")))?;
+    fs::create_dir_all(directory).map_err(|error| {
+        Error::new(
+            format!(
+                "could not create {subject} directory '{}': {error}",
+                directory.display()
+            ),
+            "check the parent directory permissions and try again",
+        )
+    })?;
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).map_err(|error| {
+        Error::new(
+            format!(
+                "could not secure {subject} directory '{}': {error}",
+                directory.display()
+            ),
+            "check its permissions and try again",
+        )
+    })?;
 
     let filename = path
         .file_name()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| format!("invalid {subject} path"))?;
+        .ok_or_else(|| Error::internal(format!("invalid {subject} path")))?;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -29,11 +45,26 @@ pub fn write_private(path: &Path, bytes: &[u8], subject: &str) -> Result<(), Str
             .create_new(true)
             .mode(0o600)
             .open(&temporary)
-            .map_err(|error| format!("could not create {subject}: {error}"))?;
+            .map_err(|error| {
+                Error::new(
+                    format!("could not create {subject}: {error}"),
+                    format!("check '{}' permissions and try again", directory.display()),
+                )
+            })?;
         file.write_all(bytes)
             .and_then(|()| file.sync_all())
-            .map_err(|error| format!("could not write {subject}: {error}"))?;
-        fs::rename(&temporary, path).map_err(|error| format!("could not save {subject}: {error}"))
+            .map_err(|error| {
+                Error::new(
+                    format!("could not write {subject}: {error}"),
+                    "check available disk space and try again",
+                )
+            })?;
+        fs::rename(&temporary, path).map_err(|error| {
+            Error::new(
+                format!("could not save {subject}: {error}"),
+                format!("check '{}' permissions and try again", directory.display()),
+            )
+        })
     })();
 
     if result.is_err() {

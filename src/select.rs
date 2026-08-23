@@ -13,6 +13,7 @@ use crossterm::terminal::{
 };
 use unicode_width::UnicodeWidthStr;
 
+use crate::error::{Error, Result};
 use crate::terminal::keyboard_enhancement_flags;
 
 const DEFAULT_LABEL_WIDTH: usize = 18;
@@ -85,12 +86,7 @@ struct DrawState {
     viewport: Viewport,
 }
 
-pub fn choose(
-    title: &str,
-    subtitle: &str,
-    items: &[Item],
-    initial: usize,
-) -> Result<Choice, String> {
+pub fn choose(title: &str, subtitle: &str, items: &[Item], initial: usize) -> Result<Choice> {
     match choose_inner(title, subtitle, items, initial, DEFAULT_LABEL_WIDTH, false)? {
         MenuChoice::Selected(index) => Ok(Choice::Selected(index)),
         MenuChoice::Cancelled => Ok(Choice::Cancelled),
@@ -104,7 +100,7 @@ pub fn choose_deletable(
     items: &[Item],
     initial: usize,
     label_width: usize,
-) -> Result<DeletableChoice, String> {
+) -> Result<DeletableChoice> {
     match choose_inner(title, subtitle, items, initial, label_width, true)? {
         MenuChoice::Selected(index) => Ok(DeletableChoice::Selected(index)),
         MenuChoice::Deleted(index) => Ok(DeletableChoice::Deleted(index)),
@@ -119,7 +115,7 @@ fn choose_inner(
     initial: usize,
     label_width: usize,
     deletable: bool,
-) -> Result<MenuChoice, String> {
+) -> Result<MenuChoice> {
     debug_assert!(!items.is_empty());
     debug_assert!(items.iter().any(|item| item.selectable));
     let mut selected = selectable_at_or_after(items, initial.min(items.len() - 1));
@@ -155,7 +151,7 @@ fn choose_inner(
         )?;
         let Event::Key(KeyEvent {
             code, modifiers, ..
-        }) = event::read().map_err(|error| format!("could not read menu input: {error}"))?
+        }) = event::read().map_err(|error| Error::terminal("could not read menu input", error))?
         else {
             continue;
         };
@@ -204,7 +200,7 @@ fn draw(
     items: &[Item],
     label_width: usize,
     state: DrawState,
-) -> Result<(), String> {
+) -> Result<()> {
     let mut output = io::stderr();
     execute!(
         output,
@@ -217,7 +213,7 @@ fn draw(
         Print(subtitle),
         Print("\r\n\r\n")
     )
-    .map_err(|error| format!("could not draw menu: {error}"))?;
+    .map_err(|error| Error::terminal("could not draw menu", error))?;
 
     let end = (state.offset + state.viewport.capacity).min(items.len());
     let item_width = state.viewport.width.saturating_sub(6);
@@ -241,7 +237,7 @@ fn draw(
                 SetAttribute(Attribute::Reset)
             )
         }
-        .map_err(|error| format!("could not draw menu: {error}"))?;
+        .map_err(|error| Error::terminal("could not draw menu", error))?;
     }
     if items.len() > state.viewport.capacity {
         let status = match (state.offset > 0, end < items.len()) {
@@ -251,7 +247,7 @@ fn draw(
             (false, false) => unreachable!("long menus always have hidden items"),
         };
         execute!(output, Print(format!("\r\n    {status}\r\n")))
-            .map_err(|error| format!("could not draw menu: {error}"))?;
+            .map_err(|error| Error::terminal("could not draw menu", error))?;
     }
     let help = match state.delete {
         DeleteState::Confirming => "Delete this saved session?  enter delete  esc cancel",
@@ -260,7 +256,7 @@ fn draw(
     };
     execute!(output, Print("\r\n"), Print(help))
         .and_then(|()| output.flush())
-        .map_err(|error| format!("could not draw menu: {error}"))
+        .map_err(|error| Error::terminal("could not draw menu", error))
 }
 
 fn item_line(item: &Item, label_width: usize, available_width: usize) -> String {
@@ -343,8 +339,8 @@ fn visible_capacity(terminal_height: usize, item_count: usize) -> usize {
 pub struct Screen;
 
 impl Screen {
-    pub fn enter() -> Result<Self, String> {
-        enable_raw_mode().map_err(|error| format!("could not open menu: {error}"))?;
+    pub fn enter() -> Result<Self> {
+        enable_raw_mode().map_err(|error| Error::terminal("could not open menu", error))?;
         if let Err(error) = execute!(
             io::stderr(),
             EnterAlternateScreen,
@@ -360,7 +356,7 @@ impl Screen {
                 LeaveAlternateScreen
             );
             let _ = disable_raw_mode();
-            return Err(format!("could not open menu: {error}"));
+            return Err(Error::terminal("could not open menu", error));
         }
         Ok(Self)
     }

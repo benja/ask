@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+use crate::error::{Error, Result};
 use crate::storage;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -66,46 +67,52 @@ impl Session {
         })
     }
 
-    fn from_json(value: &Value) -> Result<Self, String> {
+    fn from_json(value: &Value) -> Result<Self> {
         let version = value.get("version").and_then(Value::as_u64).unwrap_or(1);
-        if !matches!(version, 1 | 2) {
-            return Err(format!("session version {version} is not supported"));
+        if version > 2 {
+            return Err(Error::new(
+                format!("session version {version} requires a newer version of ask"),
+                "run 'ask --upgrade'",
+            ));
+        }
+        if version == 0 {
+            return Err(invalid_session("session version 0 is not supported"));
         }
         let string = |key: &str| {
             value[key]
                 .as_str()
                 .map(str::to_owned)
-                .ok_or_else(|| format!("missing or invalid '{key}'"))
+                .ok_or_else(|| invalid_session(format!("missing or invalid '{key}'")))
         };
         let turns = value["turns"]
             .as_array()
-            .ok_or_else(|| "missing or invalid 'turns'".to_string())?
+            .ok_or_else(|| invalid_session("missing or invalid 'turns'"))?
             .iter()
             .map(|turn| {
                 Ok(Turn {
                     user: turn["user"]
                         .as_str()
-                        .ok_or_else(|| "turn is missing 'user'".to_string())?
+                        .ok_or_else(|| invalid_session("turn is missing 'user'"))?
                         .to_owned(),
                     assistant: turn["assistant"]
                         .as_str()
-                        .ok_or_else(|| "turn is missing 'assistant'".to_string())?
+                        .ok_or_else(|| invalid_session("turn is missing 'assistant'"))?
                         .to_owned(),
                 })
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>>>()?;
 
         let harness_session_id = value["harness_session_id"]
             .as_str()
             .or_else(|| value["harness_id"].as_str())
-            .ok_or_else(|| "missing or invalid 'harness_session_id'".to_string())?
+            .ok_or_else(|| invalid_session("missing or invalid 'harness_session_id'"))?
             .to_owned();
         let settings = value
             .get("settings")
             .filter(|settings| !settings.is_null())
             .map(|settings| {
                 if !settings.is_object() {
-                    return Err("missing or invalid 'settings'".to_string());
+                    return Err(invalid_session("missing or invalid 'settings'"));
                 }
                 Ok(SessionSettings {
                     model: optional_string(settings, "model")?,
@@ -120,75 +127,108 @@ impl Session {
             cwd: string("cwd")?,
             updated_at: value["updated_at"]
                 .as_u64()
-                .ok_or_else(|| "missing or invalid 'updated_at'".to_string())?,
+                .ok_or_else(|| invalid_session("missing or invalid 'updated_at'"))?,
             settings,
             turns,
         })
     }
 }
 
-pub fn save(session: &Session) -> Result<(), String> {
+pub fn save(session: &Session) -> Result<()> {
     let directory = directory()?;
     let destination = directory.join(format!("{}.json", file_key(&session.harness_session_id)));
     let bytes = serde_json::to_vec_pretty(&session.to_json())
-        .map_err(|error| format!("could not encode session: {error}"))?;
+        .map_err(|error| Error::internal(format!("could not encode session: {error}")))?;
     storage::write_private(&destination, &bytes, "session")
 }
 
-pub fn delete(session: &Session) -> Result<(), String> {
+pub fn delete(session: &Session) -> Result<()> {
     delete_from(&directory()?, session)
 }
 
-fn delete_from(directory: &Path, session: &Session) -> Result<(), String> {
+fn delete_from(directory: &Path, session: &Session) -> Result<()> {
     let path = directory.join(format!("{}.json", file_key(&session.harness_session_id)));
-    fs::remove_file(&path)
-        .map_err(|error| format!("could not delete session '{}': {error}", path.display()))
+    fs::remove_file(&path).map_err(|error| {
+        Error::new(
+            format!("could not delete session '{}': {error}", path.display()),
+            "check its permissions and try again",
+        )
+    })
 }
 
-pub fn latest(cwd: &Path) -> Result<Session, String> {
+pub fn latest(cwd: &Path) -> Result<Session> {
     let cwd = cwd.to_string_lossy();
     load_all()?
         .into_iter()
         .filter(|session| session.cwd == cwd)
         .max_by_key(|session| session.updated_at)
-        .ok_or_else(|| "no saved sessions for this folder".to_string())
+        .ok_or_else(|| {
+            Error::new(
+                "no saved sessions for this folder",
+                "start one by running 'ask'",
+            )
+        })
 }
 
-pub fn load_all() -> Result<Vec<Session>, String> {
+pub fn load_all() -> Result<Vec<Session>> {
     let directory = directory()?;
     if !directory.exists() {
         return Ok(Vec::new());
     }
 
     let mut sessions = Vec::new();
-    let entries = fs::read_dir(&directory)
-        .map_err(|error| format!("could not read session directory: {error}"))?;
+    let entries = fs::read_dir(&directory).map_err(|error| {
+        Error::new(
+            format!(
+                "could not read session directory '{}': {error}",
+                directory.display()
+            ),
+            "check its permissions and try again",
+        )
+    })?;
     for entry in entries {
         let path = entry
-            .map_err(|error| format!("could not read session entry: {error}"))?
+            .map_err(|error| {
+                Error::new(
+                    format!("could not read a session entry: {error}"),
+                    "check the session directory permissions and try again",
+                )
+            })?
             .path();
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        let bytes = fs::read(&path)
-            .map_err(|error| format!("could not read '{}': {error}", path.display()))?;
-        let value: Value = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("could not parse '{}': {error}", path.display()))?;
+        let bytes = fs::read(&path).map_err(|error| {
+            Error::new(
+                format!("could not read '{}': {error}", path.display()),
+                "check its permissions and try again",
+            )
+        })?;
+        let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+            Error::new(
+                format!("could not parse '{}': {error}", path.display()),
+                "remove this file and try again",
+            )
+        })?;
         sessions.push(
             Session::from_json(&value)
-                .map_err(|error| format!("invalid session '{}': {error}", path.display()))?,
+                .map_err(|error| error.context(format!("invalid session '{}'", path.display())))?,
         );
     }
     sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
     Ok(sessions)
 }
 
-pub fn directory() -> Result<PathBuf, String> {
+pub fn directory() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(path).join("ask/sessions"));
     }
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| "HOME is not set; set XDG_STATE_HOME to store sessions".to_string())?;
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        Error::new(
+            "HOME is not set",
+            "set XDG_STATE_HOME to a writable directory and try again",
+        )
+    })?;
     Ok(PathBuf::from(home).join(".local/state/ask/sessions"))
 }
 
@@ -206,12 +246,18 @@ fn now() -> u64 {
         .as_secs()
 }
 
-fn optional_string(value: &Value, key: &str) -> Result<Option<String>, String> {
+fn optional_string(value: &Value, key: &str) -> Result<Option<String>> {
     match value.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => Ok(Some(value.clone())),
-        Some(_) => Err(format!("missing or invalid 'settings.{key}'")),
+        Some(_) => Err(invalid_session(format!(
+            "missing or invalid 'settings.{key}'"
+        ))),
     }
+}
+
+fn invalid_session(message: impl Into<String>) -> Error {
+    Error::new(message, "remove the invalid session file and try again")
 }
 
 #[cfg(test)]

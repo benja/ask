@@ -1,5 +1,7 @@
 use std::ffi::OsString;
 
+use crate::error::{Error, Result};
+
 pub const HELP: &str = concat!(
     "Ask, then do. Follow up when you need to.\n",
     "\n",
@@ -33,7 +35,7 @@ pub enum Mode {
     Version,
 }
 
-pub fn parse(args: impl Iterator<Item = OsString>) -> Result<Mode, String> {
+pub fn parse(args: impl Iterator<Item = OsString>) -> Result<Mode> {
     let mut words = Vec::new();
     let mut options = true;
     let mut resume = false;
@@ -43,7 +45,7 @@ pub fn parse(args: impl Iterator<Item = OsString>) -> Result<Mode, String> {
     for arg in args {
         let arg = arg
             .into_string()
-            .map_err(|_| "arguments must be valid UTF-8".to_string())?;
+            .map_err(|_| Error::usage("arguments must be valid UTF-8"))?;
 
         if options {
             match arg.as_str() {
@@ -59,7 +61,7 @@ pub fn parse(args: impl Iterator<Item = OsString>) -> Result<Mode, String> {
                 }
                 "-c" | "--continue" => {
                     if resume {
-                        return Err("continue option may only be used once".into());
+                        return Err(Error::usage("use '--continue' only once"));
                     }
                     resume = true;
                     continue;
@@ -74,13 +76,13 @@ pub fn parse(args: impl Iterator<Item = OsString>) -> Result<Mode, String> {
                 }
                 "--upgrade" => {
                     if upgrade {
-                        return Err("upgrade option may only be used once".into());
+                        return Err(Error::usage("use '--upgrade' only once"));
                     }
                     upgrade = true;
                     continue;
                 }
                 _ if arg.starts_with('-') => {
-                    return Err(format!("unknown option '{arg}' (try 'ask --help')"));
+                    return Err(Error::usage(format!("unknown option '{arg}'")));
                 }
                 _ => {}
             }
@@ -90,16 +92,27 @@ pub fn parse(args: impl Iterator<Item = OsString>) -> Result<Mode, String> {
     }
 
     if sessions && resume {
-        return Err("--sessions cannot be combined with --continue".into());
+        return Err(Error::usage(
+            "--sessions cannot be combined with --continue",
+        ));
     }
     if sessions && !words.is_empty() {
-        return Err("--sessions does not accept a question".into());
+        return Err(Error::new(
+            "--sessions does not accept a question",
+            "run 'ask --sessions' by itself",
+        ));
     }
     if settings && (sessions || resume || !words.is_empty()) {
-        return Err("--settings cannot be combined with other arguments".into());
+        return Err(Error::new(
+            "--settings cannot be combined with other arguments",
+            "run 'ask --settings' by itself",
+        ));
     }
     if upgrade && (settings || sessions || resume || !words.is_empty()) {
-        return Err("--upgrade cannot be combined with other arguments".into());
+        return Err(Error::new(
+            "--upgrade cannot be combined with other arguments",
+            "run 'ask --upgrade' by itself",
+        ));
     }
     let mode = if upgrade {
         Mode::Upgrade

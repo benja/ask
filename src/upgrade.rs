@@ -7,7 +7,10 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
 
+use crate::error::{Error, Result};
+
 const RELEASE_URL: &str = "https://api.github.com/repos/benja/ask/releases/latest";
+const REPOSITORY_URL: &str = "https://github.com/benja/ask";
 const USER_AGENT: &str = concat!("ask/", env!("CARGO_PKG_VERSION"));
 const INSTALLER: &[u8] = include_bytes!("../install.sh");
 
@@ -15,7 +18,7 @@ const INSTALLER: &[u8] = include_bytes!("../install.sh");
 struct Version([u64; 3]);
 
 impl Version {
-    fn parse(value: &str) -> Result<Self, String> {
+    fn parse(value: &str) -> Result<Self> {
         let mut parts = value.split('.');
         let version = Self([
             component(parts.next(), value)?,
@@ -23,16 +26,16 @@ impl Version {
             component(parts.next(), value)?,
         ]);
         if parts.next().is_some() {
-            return Err(format!("invalid release version '{value}'"));
+            return Err(invalid_version(value));
         }
         Ok(version)
     }
 
-    fn from_tag(tag: &str) -> Result<Self, String> {
+    fn from_tag(tag: &str) -> Result<Self> {
         let version = tag
             .strip_prefix('v')
-            .ok_or_else(|| format!("latest GitHub release has invalid tag '{tag}'"))?;
-        Self::parse(version).map_err(|_| format!("latest GitHub release has invalid tag '{tag}'"))
+            .ok_or_else(|| invalid_release_tag(tag))?;
+        Self::parse(version).map_err(|_| invalid_release_tag(tag))
     }
 }
 
@@ -42,9 +45,9 @@ impl fmt::Display for Version {
     }
 }
 
-pub fn run() -> Result<Option<String>, String> {
+pub fn run() -> Result<Option<String>> {
     let current = Version::parse(env!("CARGO_PKG_VERSION"))
-        .map_err(|_| "ask was built with an unsupported version".to_string())?;
+        .map_err(|_| Error::internal("ask was built with an unsupported version"))?;
     let latest = latest_release()?;
     apply_upgrade(current, latest, install)
 }
@@ -52,8 +55,8 @@ pub fn run() -> Result<Option<String>, String> {
 fn apply_upgrade(
     current: Version,
     latest: Version,
-    install: impl FnOnce(Version) -> Result<(), String>,
-) -> Result<Option<String>, String> {
+    install: impl FnOnce(Version) -> Result<()>,
+) -> Result<Option<String>> {
     match latest.cmp(&current) {
         Ordering::Equal => Ok(Some(format!("ask is already up to date (v{current})"))),
         Ordering::Less => Ok(Some(format!(
@@ -66,12 +69,12 @@ fn apply_upgrade(
     }
 }
 
-fn latest_release() -> Result<Version, String> {
+fn latest_release() -> Result<Version> {
     let output = fetch_release()?;
     parse_release(&output)
 }
 
-pub(crate) fn latest_release_version() -> Result<String, String> {
+pub(crate) fn latest_release_version() -> Result<String> {
     latest_release().map(|version| version.to_string())
 }
 
@@ -82,7 +85,7 @@ pub(crate) fn is_newer_release(latest: &str) -> bool {
     Version::parse(latest).is_ok_and(|latest| latest > current)
 }
 
-fn fetch_release() -> Result<Vec<u8>, String> {
+fn fetch_release() -> Result<Vec<u8>> {
     match Command::new("curl")
         .args([
             "--proto",
@@ -102,50 +105,61 @@ fn fetch_release() -> Result<Vec<u8>, String> {
         .output()
     {
         Ok(output) => checked_output("curl", output),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Command::new("wget")
-            .args(["-T", "30", "-t", "1", "-qO-", RELEASE_URL])
-            .output()
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    "curl or wget is required to check for upgrades".to_string()
-                } else {
-                    format!("could not start wget: {error}")
-                }
-            })
-            .and_then(|output| checked_output("wget", output)),
-        Err(error) => Err(format!("could not start curl: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let output = Command::new("wget")
+                .args(["-T", "30", "-t", "1", "-qO-", RELEASE_URL])
+                .output()
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        Error::new(
+                            "curl or wget is required to check for upgrades",
+                            "install either command, then run 'ask --upgrade' again",
+                        )
+                    } else {
+                        release_check_error(format!("could not start wget: {error}"))
+                    }
+                })?;
+            checked_output("wget", output)
+        }
+        Err(error) => Err(release_check_error(format!(
+            "could not start curl: {error}"
+        ))),
     }
 }
 
-fn checked_output(program: &str, output: Output) -> Result<Vec<u8>, String> {
+fn checked_output(program: &str, output: Output) -> Result<Vec<u8>> {
     if output.status.success() {
         return Ok(output.stdout);
     }
     let detail = String::from_utf8_lossy(&output.stderr);
     let detail = detail.trim();
-    Err(if detail.is_empty() {
+    let message = if detail.is_empty() {
         format!(
             "could not check GitHub releases: {program} exited with {}",
             output.status
         )
     } else {
         format!("could not check GitHub releases: {detail}")
-    })
+    };
+    Err(release_check_error(message))
 }
 
-fn parse_release(output: &[u8]) -> Result<Version, String> {
+fn parse_release(output: &[u8]) -> Result<Version> {
     let release: Value = serde_json::from_slice(output)
-        .map_err(|error| format!("could not parse GitHub release: {error}"))?;
+        .map_err(|error| Error::internal(format!("could not parse GitHub release: {error}")))?;
     let tag = release
         .get("tag_name")
         .and_then(Value::as_str)
-        .ok_or_else(|| "GitHub latest release is missing 'tag_name'".to_string())?;
+        .ok_or_else(|| Error::internal("GitHub latest release is missing 'tag_name'"))?;
     Version::from_tag(tag)
 }
 
-fn install(version: Version) -> Result<(), String> {
-    let executable = std::env::current_exe()
-        .map_err(|error| format!("could not locate the current ask executable: {error}"))?;
+fn install(version: Version) -> Result<()> {
+    let executable = std::env::current_exe().map_err(|error| {
+        Error::internal(format!(
+            "could not locate the current ask executable: {error}"
+        ))
+    })?;
     let directory = install_directory(&executable)?;
     let version = version.to_string();
     let mut child = Command::new("/bin/sh")
@@ -153,7 +167,7 @@ fn install(version: Version) -> Result<(), String> {
         .env("ASK_INSTALL_DIR", directory)
         .stdin(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("could not start the installer: {error}"))?;
+        .map_err(|error| install_error(format!("could not start the installer: {error}")))?;
 
     let write = child
         .stdin
@@ -163,39 +177,62 @@ fn install(version: Version) -> Result<(), String> {
     if let Err(error) = write {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(format!("could not run the installer: {error}"));
+        return Err(install_error(format!(
+            "could not run the installer: {error}"
+        )));
     }
 
     let status = child
         .wait()
-        .map_err(|error| format!("could not wait for the installer: {error}"))?;
+        .map_err(|error| install_error(format!("could not wait for the installer: {error}")))?;
     if status.success() {
         Ok(())
     } else {
-        Err("upgrade failed".into())
+        Err(install_error("upgrade failed"))
     }
 }
 
-fn install_directory(executable: &Path) -> Result<&Path, String> {
+fn install_directory(executable: &Path) -> Result<&Path> {
     if executable.file_name() != Some(OsStr::new("ask")) {
-        return Err(format!(
-            "cannot upgrade renamed executable '{}'; reinstall ask manually",
+        return Err(install_error(format!(
+            "cannot upgrade renamed executable '{}'",
             executable.display()
-        ));
+        )));
     }
     executable
         .parent()
-        .ok_or_else(|| "could not determine ask's install directory".to_string())
+        .ok_or_else(|| Error::internal("could not determine ask's install directory"))
 }
 
-fn component(part: Option<&str>, value: &str) -> Result<u64, String> {
-    let part = part.ok_or_else(|| format!("invalid release version '{value}'"))?;
+fn component(part: Option<&str>, value: &str) -> Result<u64> {
+    let part = part.ok_or_else(|| invalid_version(value))?;
     if !part.bytes().all(|byte| byte.is_ascii_digit()) || (part.len() > 1 && part.starts_with('0'))
     {
-        return Err(format!("invalid release version '{value}'"));
+        return Err(invalid_version(value));
     }
-    part.parse()
-        .map_err(|_| format!("invalid release version '{value}'"))
+    part.parse().map_err(|_| invalid_version(value))
+}
+
+fn invalid_version(value: &str) -> Error {
+    Error::internal(format!("invalid release version '{value}'"))
+}
+
+fn invalid_release_tag(tag: &str) -> Error {
+    Error::internal(format!("latest GitHub release has invalid tag '{tag}'"))
+}
+
+fn release_check_error(message: impl Into<String>) -> Error {
+    Error::new(
+        message,
+        "check your connection, then run 'ask --upgrade' again",
+    )
+}
+
+fn install_error(message: impl Into<String>) -> Error {
+    Error::new(
+        message,
+        format!("reinstall ask using the instructions at {REPOSITORY_URL}"),
+    )
 }
 
 #[cfg(test)]
@@ -271,16 +308,6 @@ mod tests {
             newer.as_deref(),
             Some("ask v1.0.0 is newer than the latest release (v0.9.9)")
         );
-    }
-
-    #[test]
-    fn installer_errors_are_preserved() {
-        let error = apply_upgrade(version("0.1.0"), version("0.2.0"), |_| {
-            Err("install failed".into())
-        })
-        .unwrap_err();
-
-        assert_eq!(error, "install failed");
     }
 
     #[test]

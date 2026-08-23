@@ -7,6 +7,8 @@ use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+use crate::error::{Error, Result};
+
 #[derive(Debug)]
 pub struct Response {
     pub answer: String,
@@ -37,15 +39,15 @@ pub struct ReasoningLevel {
 }
 
 pub trait Harness {
-    fn models(&mut self) -> Result<Vec<Model>, String>;
+    fn models(&mut self) -> Result<Vec<Model>>;
 
     fn ask(
         &mut self,
         question: &str,
         session_id: Option<&str>,
         options: RunOptions<'_>,
-        on_delta: &mut dyn FnMut(&str) -> Result<(), String>,
-    ) -> Result<Response, String>;
+        on_delta: &mut dyn FnMut(&str) -> Result<()>,
+    ) -> Result<Response>;
 }
 
 #[derive(Clone, Copy)]
@@ -142,18 +144,21 @@ pub fn agent_name(agent: &str) -> &str {
     find(agent).map_or(agent, |definition| definition.name)
 }
 
-pub fn resolve(name: &str) -> Result<&'static Definition, String> {
+pub fn resolve(name: &str) -> Result<&'static Definition> {
     find(name).ok_or_else(|| {
         let available = DEFINITIONS
             .iter()
             .map(|definition| definition.id)
             .collect::<Vec<_>>()
             .join(", ");
-        format!("unknown agent '{name}' (available agents: {available})")
+        Error::new(
+            format!("unknown agent '{name}' (available: {available})"),
+            "run 'ask --settings' to choose an installed agent",
+        )
     })
 }
 
-pub fn create(name: &str) -> Result<Box<dyn Harness>, String> {
+pub fn create(name: &str) -> Result<Box<dyn Harness>> {
     Ok(resolve(name)?.create())
 }
 

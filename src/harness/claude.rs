@@ -4,6 +4,7 @@ use std::process::Command;
 use serde_json::Value;
 
 use super::{Harness, Model, Response, RunOptions, executable_available};
+use crate::error::{Error, Result};
 
 pub struct Claude {
     program: OsString,
@@ -50,7 +51,7 @@ impl Claude {
 }
 
 impl Harness for Claude {
-    fn models(&mut self) -> Result<Vec<Model>, String> {
+    fn models(&mut self) -> Result<Vec<Model>> {
         Ok([("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")]
             .into_iter()
             .map(|(id, name)| Model {
@@ -69,25 +70,34 @@ impl Harness for Claude {
         question: &str,
         session_id: Option<&str>,
         options: RunOptions<'_>,
-        _on_delta: &mut dyn FnMut(&str) -> Result<(), String>,
-    ) -> Result<Response, String> {
+        _on_delta: &mut dyn FnMut(&str) -> Result<()>,
+    ) -> Result<Response> {
         if options.reasoning.is_some() {
-            return Err("reasoning control is currently only supported for Codex".into());
+            return Err(Error::new(
+                "reasoning control is not supported for Claude Code",
+                "choose Model default reasoning in 'ask --settings' and try again",
+            ));
         }
         let output = self
             .command(question, session_id, &options)
             .output()
             .map_err(|error| {
                 if error.kind() == std::io::ErrorKind::NotFound {
-                    "Claude Code is not installed or not on PATH; install it and authenticate first"
-                        .into()
+                    Error::new(
+                        "Claude Code is not installed or not on PATH",
+                        "install it, authenticate, then try again",
+                    )
                 } else {
-                    format!("could not start Claude Code: {error}")
+                    Error::agent("claude", format!("could not start Claude Code: {error}"))
                 }
             })?;
 
-        let stdout = String::from_utf8(output.stdout)
-            .map_err(|_| "Claude Code returned output that was not valid UTF-8".to_string())?;
+        let stdout = String::from_utf8(output.stdout).map_err(|_| {
+            Error::agent(
+                "claude",
+                "Claude Code returned output that was not valid UTF-8",
+            )
+        })?;
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         let response = parse_response(&stdout).map_err(|error| {
@@ -95,45 +105,63 @@ impl Harness for Claude {
             if detail.is_empty() {
                 error
             } else {
-                format!("{error}: {detail}")
+                error.detail(detail)
             }
         })?;
 
         if !output.status.success() {
             let detail = stderr.trim();
-            return Err(if detail.is_empty() {
+            let message = if detail.is_empty() {
                 format!("Claude Code exited with {}", output.status)
             } else {
                 format!("Claude Code failed: {detail}")
-            });
+            };
+            return Err(Error::agent("claude", message));
         }
 
         Ok(response)
     }
 }
 
-fn parse_response(output: &str) -> Result<Response, String> {
-    let response: Value = serde_json::from_str(output)
-        .map_err(|error| format!("could not parse Claude Code response: {error}"))?;
+fn parse_response(output: &str) -> Result<Response> {
+    let response: Value = serde_json::from_str(output).map_err(|error| {
+        Error::agent(
+            "claude",
+            format!("could not parse Claude Code response: {error}"),
+        )
+    })?;
 
     if response.get("is_error").and_then(Value::as_bool) == Some(true) {
         let detail = response
             .get("result")
             .and_then(Value::as_str)
             .unwrap_or("unknown error");
-        return Err(format!("Claude Code reported an error: {detail}"));
+        return Err(Error::agent(
+            "claude",
+            format!("Claude Code reported an error: {detail}"),
+        ));
     }
 
     Ok(Response {
         answer: response
             .get("result")
             .and_then(Value::as_str)
-            .ok_or_else(|| "Claude Code completed without returning an answer".to_string())?
+            .ok_or_else(|| {
+                Error::agent(
+                    "claude",
+                    "Claude Code completed without returning an answer",
+                )
+            })?
             .to_owned(),
         session_id: response
             .get("session_id")
             .and_then(Value::as_str)
-            .ok_or_else(|| "Claude Code completed without returning a session ID".to_string())?
+            .ok_or_else(|| {
+                Error::agent(
+                    "claude",
+                    "Claude Code completed without returning a session ID",
+                )
+            })?
             .to_owned(),
     })
 }
@@ -186,6 +214,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error, "Claude Code reported an error: not authenticated");
+        assert_eq!(
+            error.message(),
+            "Claude Code reported an error: not authenticated"
+        );
     }
 }

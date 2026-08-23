@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 use serde_json::{Map, Value, json};
 
 use super::{Harness, Model, Response, RunOptions, executable_available};
+use crate::error::{Error, Result};
 
 const AGENT_ID: &str = "ask-read-only";
 
@@ -29,7 +30,7 @@ impl OpenCode {
         question: &str,
         session_id: Option<&str>,
         options: &RunOptions<'_>,
-    ) -> Result<Command, String> {
+    ) -> Result<Command> {
         let existing = std::env::var("OPENCODE_CONFIG_CONTENT").ok();
         let config = inline_config(existing.as_deref(), options.instructions)?;
         let mut command = Command::new(&self.program);
@@ -50,7 +51,7 @@ impl OpenCode {
 }
 
 impl Harness for OpenCode {
-    fn models(&mut self) -> Result<Vec<Model>, String> {
+    fn models(&mut self) -> Result<Vec<Model>> {
         let output = Command::new(&self.program)
             .args(["--pure", "models"])
             .output()
@@ -61,8 +62,12 @@ impl Harness for OpenCode {
                 &output.stderr,
             ));
         }
-        let output = String::from_utf8(output.stdout)
-            .map_err(|_| "OpenCode returned a model list that was not valid UTF-8".to_string())?;
+        let output = String::from_utf8(output.stdout).map_err(|_| {
+            Error::agent(
+                "opencode",
+                "OpenCode returned a model list that was not valid UTF-8",
+            )
+        })?;
         parse_models(&output)
     }
 
@@ -71,8 +76,8 @@ impl Harness for OpenCode {
         question: &str,
         session_id: Option<&str>,
         options: RunOptions<'_>,
-        on_delta: &mut dyn FnMut(&str) -> Result<(), String>,
-    ) -> Result<Response, String> {
+        on_delta: &mut dyn FnMut(&str) -> Result<()>,
+    ) -> Result<Response> {
         let mut child = self
             .command(question, session_id, &options)?
             .stdout(Stdio::piped())
@@ -88,19 +93,28 @@ impl Harness for OpenCode {
         });
 
         let response = read_events(BufReader::new(stdout), on_delta);
-        let status = child
-            .wait()
-            .map_err(|error| format!("could not wait for OpenCode: {error}"))?;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| "could not read OpenCode error output".to_string())?;
+        let status = child.wait().map_err(|error| {
+            Error::new(
+                format!("could not wait for OpenCode: {error}"),
+                "restart ask and try again",
+            )
+        })?;
+        let stderr = stderr_reader.join().map_err(|_| {
+            Error::new(
+                "could not read OpenCode error output",
+                "restart ask and try again",
+            )
+        })?;
 
         if !status.success() {
             let detail = String::from_utf8_lossy(&stderr);
             if detail.trim().is_empty() {
                 return match response {
                     Err(error) => Err(error),
-                    Ok(_) => Err(format!("OpenCode exited with {status}")),
+                    Ok(_) => Err(Error::agent(
+                        "opencode",
+                        format!("OpenCode exited with {status}"),
+                    )),
                 };
             }
             return Err(command_error("OpenCode failed", &stderr));
@@ -109,13 +123,23 @@ impl Harness for OpenCode {
     }
 }
 
-fn inline_config(existing: Option<&str>, instructions: Option<&str>) -> Result<String, String> {
+fn inline_config(existing: Option<&str>, instructions: Option<&str>) -> Result<String> {
     let mut config = match existing {
         Some(existing) => serde_json::from_str::<Value>(existing)
-            .map_err(|error| format!("could not parse OPENCODE_CONFIG_CONTENT: {error}"))?
+            .map_err(|error| {
+                Error::new(
+                    format!("could not parse OPENCODE_CONFIG_CONTENT: {error}"),
+                    "fix or unset OPENCODE_CONFIG_CONTENT, then try again",
+                )
+            })?
             .as_object()
             .cloned()
-            .ok_or_else(|| "OPENCODE_CONFIG_CONTENT must contain a JSON object".to_string())?,
+            .ok_or_else(|| {
+                Error::new(
+                    "OPENCODE_CONFIG_CONTENT must contain a JSON object",
+                    "fix or unset OPENCODE_CONFIG_CONTENT, then try again",
+                )
+            })?,
         None => Map::new(),
     };
     let mut agent = json!({
@@ -145,13 +169,19 @@ fn inline_config(existing: Option<&str>, instructions: Option<&str>) -> Result<S
         .entry("agent")
         .or_insert_with(|| json!({}))
         .as_object_mut()
-        .ok_or_else(|| "OPENCODE_CONFIG_CONTENT has an invalid 'agent' value".to_string())?;
+        .ok_or_else(|| {
+            Error::new(
+                "OPENCODE_CONFIG_CONTENT has an invalid 'agent' value",
+                "fix or unset OPENCODE_CONFIG_CONTENT, then try again",
+            )
+        })?;
     agents.insert(AGENT_ID.into(), agent);
     config.insert("share".into(), Value::String("disabled".into()));
-    serde_json::to_string(&config).map_err(|error| format!("could not configure OpenCode: {error}"))
+    serde_json::to_string(&config)
+        .map_err(|error| Error::internal(format!("could not configure OpenCode: {error}")))
 }
 
-fn parse_models(output: &str) -> Result<Vec<Model>, String> {
+fn parse_models(output: &str) -> Result<Vec<Model>> {
     let models = output
         .lines()
         .map(str::trim)
@@ -160,7 +190,12 @@ fn parse_models(output: &str) -> Result<Vec<Model>, String> {
             let (provider, model) = id
                 .split_once('/')
                 .filter(|(provider, model)| !provider.is_empty() && !model.is_empty())
-                .ok_or_else(|| format!("OpenCode returned an invalid model ID: {id}"))?;
+                .ok_or_else(|| {
+                    Error::agent(
+                        "opencode",
+                        format!("OpenCode returned an invalid model ID: {id}"),
+                    )
+                })?;
             Ok(Model {
                 id: id.to_owned(),
                 name: model.to_owned(),
@@ -170,9 +205,12 @@ fn parse_models(output: &str) -> Result<Vec<Model>, String> {
                 default_reasoning: None,
             })
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>>>()?;
     if models.is_empty() {
-        Err("OpenCode did not report any available models".into())
+        Err(Error::agent(
+            "opencode",
+            "OpenCode did not report any available models",
+        ))
     } else {
         Ok(models)
     }
@@ -180,19 +218,28 @@ fn parse_models(output: &str) -> Result<Vec<Model>, String> {
 
 fn read_events(
     reader: impl BufRead,
-    on_delta: &mut dyn FnMut(&str) -> Result<(), String>,
-) -> Result<Response, String> {
+    on_delta: &mut dyn FnMut(&str) -> Result<()>,
+) -> Result<Response> {
     let mut session_id = None;
     let mut answer = String::new();
     let mut reported_error = None;
 
     for line in reader.lines() {
-        let line = line.map_err(|error| format!("could not read OpenCode response: {error}"))?;
+        let line = line.map_err(|error| {
+            Error::agent(
+                "opencode",
+                format!("could not read OpenCode response: {error}"),
+            )
+        })?;
         if line.trim().is_empty() {
             continue;
         }
-        let event: Value = serde_json::from_str(&line)
-            .map_err(|error| format!("could not parse OpenCode response: {error}"))?;
+        let event: Value = serde_json::from_str(&line).map_err(|error| {
+            Error::agent(
+                "opencode",
+                format!("could not parse OpenCode response: {error}"),
+            )
+        })?;
         if session_id.is_none() {
             session_id = event
                 .get("sessionID")
@@ -220,34 +267,48 @@ fn read_events(
     }
 
     if let Some(error) = reported_error {
-        return Err(format!("OpenCode reported an error: {error}"));
+        return Err(Error::agent(
+            "opencode",
+            format!("OpenCode reported an error: {error}"),
+        ));
     }
     if answer.is_empty() {
-        return Err("OpenCode completed without returning an answer".into());
+        return Err(Error::agent(
+            "opencode",
+            "OpenCode completed without returning an answer",
+        ));
     }
     Ok(Response {
         answer,
-        session_id: session_id
-            .ok_or_else(|| "OpenCode completed without returning a session ID".to_string())?,
+        session_id: session_id.ok_or_else(|| {
+            Error::agent(
+                "opencode",
+                "OpenCode completed without returning a session ID",
+            )
+        })?,
     })
 }
 
-fn start_error(error: std::io::Error) -> String {
+fn start_error(error: std::io::Error) -> Error {
     if error.kind() == std::io::ErrorKind::NotFound {
-        "OpenCode is not installed or not on PATH; install it and authenticate first".into()
+        Error::new(
+            "OpenCode is not installed or not on PATH",
+            "install it, authenticate, then try again",
+        )
     } else {
-        format!("could not start OpenCode: {error}")
+        Error::agent("opencode", format!("could not start OpenCode: {error}"))
     }
 }
 
-fn command_error(message: &str, stderr: &[u8]) -> String {
+fn command_error(message: &str, stderr: &[u8]) -> Error {
     let detail = String::from_utf8_lossy(stderr);
     let detail = detail.trim();
-    if detail.is_empty() {
+    let message = if detail.is_empty() {
         message.to_owned()
     } else {
         format!("{message}: {detail}")
-    }
+    };
+    Error::agent("opencode", message)
 }
 
 #[cfg(test)]
@@ -356,6 +417,9 @@ mod tests {
         let input = "{\"type\":\"error\",\"sessionID\":\"session-1\",\"error\":{\"data\":{\"message\":\"not authenticated\"}}}\n";
         let error = read_events(Cursor::new(input), &mut |_| Ok(())).unwrap_err();
 
-        assert_eq!(error, "OpenCode reported an error: not authenticated");
+        assert_eq!(
+            error.message(),
+            "OpenCode reported an error: not authenticated"
+        );
     }
 }

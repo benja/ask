@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 use serde_json::Value;
 
 use super::{Harness, Model, ReasoningLevel, Response, RunOptions, executable_available};
+use crate::error::{Error, Result};
 
 const READ_ONLY_TOOLS: &str = "read,grep,find,ls";
 const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh"];
@@ -58,7 +59,7 @@ impl Pi {
 }
 
 impl Harness for Pi {
-    fn models(&mut self) -> Result<Vec<Model>, String> {
+    fn models(&mut self) -> Result<Vec<Model>> {
         let output = Command::new(&self.program)
             .arg("--list-models")
             .output()
@@ -67,7 +68,7 @@ impl Harness for Pi {
             return Err(command_error("could not list Pi models", &output.stderr));
         }
         let output = String::from_utf8(output.stdout)
-            .map_err(|_| "Pi returned a model list that was not valid UTF-8".to_string())?;
+            .map_err(|_| Error::agent("pi", "Pi returned a model list that was not valid UTF-8"))?;
         parse_models(&output)
     }
 
@@ -76,8 +77,8 @@ impl Harness for Pi {
         question: &str,
         session_id: Option<&str>,
         options: RunOptions<'_>,
-        on_delta: &mut dyn FnMut(&str) -> Result<(), String>,
-    ) -> Result<Response, String> {
+        on_delta: &mut dyn FnMut(&str) -> Result<()>,
+    ) -> Result<Response> {
         let mut child = self
             .command(question, session_id, options)
             .stdout(Stdio::piped())
@@ -93,12 +94,18 @@ impl Harness for Pi {
         });
 
         let result = read_events(BufReader::new(stdout), on_delta);
-        let status = child
-            .wait()
-            .map_err(|error| format!("could not wait for Pi: {error}"))?;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| "could not read Pi error output".to_string())?;
+        let status = child.wait().map_err(|error| {
+            Error::new(
+                format!("could not wait for Pi: {error}"),
+                "restart ask and try again",
+            )
+        })?;
+        let stderr = stderr_reader.join().map_err(|_| {
+            Error::new(
+                "could not read Pi error output",
+                "restart ask and try again",
+            )
+        })?;
 
         if !status.success() {
             return Err(command_error("Pi failed", &stderr));
@@ -107,7 +114,7 @@ impl Harness for Pi {
     }
 }
 
-fn parse_models(output: &str) -> Result<Vec<Model>, String> {
+fn parse_models(output: &str) -> Result<Vec<Model>> {
     let models = output
         .lines()
         .skip(1)
@@ -142,7 +149,7 @@ fn parse_models(output: &str) -> Result<Vec<Model>, String> {
         .collect::<Vec<_>>();
 
     if models.is_empty() {
-        Err("Pi did not report any available models".into())
+        Err(Error::agent("pi", "Pi did not report any available models"))
     } else {
         Ok(models)
     }
@@ -150,16 +157,17 @@ fn parse_models(output: &str) -> Result<Vec<Model>, String> {
 
 fn read_events(
     reader: impl BufRead,
-    on_delta: &mut dyn FnMut(&str) -> Result<(), String>,
-) -> Result<Response, String> {
+    on_delta: &mut dyn FnMut(&str) -> Result<()>,
+) -> Result<Response> {
     let mut session_id = None;
     let mut answer = None;
     let mut reported_error = None;
 
     for line in reader.lines() {
-        let line = line.map_err(|error| format!("could not read Pi response: {error}"))?;
+        let line = line
+            .map_err(|error| Error::agent("pi", format!("could not read Pi response: {error}")))?;
         let event: Value = serde_json::from_str(&line)
-            .map_err(|error| format!("could not parse Pi response: {error}"))?;
+            .map_err(|error| Error::agent("pi", format!("could not parse Pi response: {error}")))?;
         match event.get("type").and_then(Value::as_str) {
             Some("session") => {
                 session_id = event.get("id").and_then(Value::as_str).map(str::to_owned);
@@ -194,31 +202,36 @@ fn read_events(
     }
 
     if let Some(error) = reported_error {
-        return Err(format!("Pi reported an error: {error}"));
+        return Err(Error::agent("pi", format!("Pi reported an error: {error}")));
     }
     Ok(Response {
-        answer: answer.ok_or_else(|| "Pi completed without returning an answer".to_string())?,
+        answer: answer
+            .ok_or_else(|| Error::agent("pi", "Pi completed without returning an answer"))?,
         session_id: session_id
-            .ok_or_else(|| "Pi completed without returning a session ID".to_string())?,
+            .ok_or_else(|| Error::agent("pi", "Pi completed without returning a session ID"))?,
     })
 }
 
-fn start_error(error: std::io::Error) -> String {
+fn start_error(error: std::io::Error) -> Error {
     if error.kind() == std::io::ErrorKind::NotFound {
-        "Pi is not installed or not on PATH; install it and authenticate first".into()
+        Error::new(
+            "Pi is not installed or not on PATH",
+            "install it, authenticate, then try again",
+        )
     } else {
-        format!("could not start Pi: {error}")
+        Error::agent("pi", format!("could not start Pi: {error}"))
     }
 }
 
-fn command_error(message: &str, stderr: &[u8]) -> String {
+fn command_error(message: &str, stderr: &[u8]) -> Error {
     let detail = String::from_utf8_lossy(stderr);
     let detail = detail.trim();
-    if detail.is_empty() {
+    let message = if detail.is_empty() {
         message.to_owned()
     } else {
         format!("{message}: {detail}")
-    }
+    };
+    Error::agent("pi", message)
 }
 
 #[cfg(test)]

@@ -2,6 +2,8 @@ use std::io::{self, Write};
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::error::{Error, Result};
+
 pub struct TerminalRenderer<W = io::Stdout> {
     output: W,
     pending: String,
@@ -37,7 +39,7 @@ impl<W: Write> TerminalRenderer<W> {
         }
     }
 
-    pub fn push(&mut self, text: &str) -> Result<(), String> {
+    pub fn push(&mut self, text: &str) -> Result<()> {
         self.pending.push_str(text);
 
         while let Some(newline) = self.pending.find('\n') {
@@ -49,7 +51,7 @@ impl<W: Write> TerminalRenderer<W> {
         Ok(())
     }
 
-    pub fn finish(mut self) -> Result<(), String> {
+    pub fn finish(mut self) -> Result<()> {
         if !self.pending.is_empty() {
             let line = std::mem::take(&mut self.pending);
             self.line(&line)?;
@@ -65,7 +67,7 @@ impl<W: Write> TerminalRenderer<W> {
         Ok(())
     }
 
-    fn line(&mut self, line: &str) -> Result<(), String> {
+    fn line(&mut self, line: &str) -> Result<()> {
         if let Some(block) = &mut self.code {
             if line.trim_start().starts_with("```") {
                 let block = self.code.take().expect("code block exists");
@@ -87,7 +89,7 @@ impl<W: Write> TerminalRenderer<W> {
         }
     }
 
-    fn draw_markdown_line(&mut self, line: &str) -> Result<(), String> {
+    fn draw_markdown_line(&mut self, line: &str) -> Result<()> {
         if let Some((nested, content)) = list_item(line) {
             if nested {
                 self.list_active = true;
@@ -108,7 +110,7 @@ impl<W: Write> TerminalRenderer<W> {
         self.write(&format!("{}\n", render_inline(line)))
     }
 
-    fn draw_code(&mut self, block: CodeBlock) -> Result<(), String> {
+    fn draw_code(&mut self, block: CodeBlock) -> Result<()> {
         let content_width = block
             .lines
             .iter()
@@ -139,7 +141,7 @@ impl<W: Write> TerminalRenderer<W> {
         self.write(&format!("└{}┘\n", "─".repeat(width + 2)))
     }
 
-    fn write(&mut self, text: &str) -> Result<(), String> {
+    fn write(&mut self, text: &str) -> Result<()> {
         match self
             .output
             .write_all(text.as_bytes())
@@ -151,7 +153,10 @@ impl<W: Write> TerminalRenderer<W> {
                 Ok(())
             }
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
-            Err(error) => Err(format!("could not write output: {error}")),
+            Err(error) => Err(Error::new(
+                format!("could not write output: {error}"),
+                "check the output destination and try again",
+            )),
         }
     }
 }

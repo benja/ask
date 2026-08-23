@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod error;
 mod harness;
 mod instructions;
 mod prompt;
@@ -15,6 +16,7 @@ mod upgrade;
 
 use std::process::ExitCode;
 
+use error::{Error, Result};
 use harness::Harness;
 use instructions::Instructions;
 
@@ -24,13 +26,13 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("ask: {error}");
+            error.print();
             ExitCode::FAILURE
         }
     }
 }
 
-fn run() -> Result<(), String> {
+fn run() -> Result<()> {
     let mode = cli::parse(std::env::args_os().skip(1))?;
     let update_check = update_check::Check::start(update_checks_enabled(&mode));
 
@@ -61,8 +63,7 @@ fn run() -> Result<(), String> {
         }
         cli::Mode::Continue(words) => {
             let config = config::Config::load()?;
-            let cwd = std::env::current_dir()
-                .map_err(|error| format!("could not determine current directory: {error}"))?;
+            let cwd = current_dir()?;
             let session = state::latest(&cwd)?;
             let agent = session.agent.clone();
             let settings = settings(Some(&agent), &config, Some(&session))?;
@@ -111,7 +112,7 @@ fn settings(
     selected_agent: Option<&str>,
     config: &config::Config,
     session: Option<&state::Session>,
-) -> Result<Settings, String> {
+) -> Result<Settings> {
     let definition = harness::resolve(selected_agent.unwrap_or(&config.agent))?;
     let agent = definition.id.to_owned();
     let saved = session.and_then(|session| session.settings.as_ref());
@@ -138,13 +139,12 @@ fn run_one_shot(
     instructions: &Instructions,
     question: &str,
     mut saved: Option<state::Session>,
-) -> Result<(), String> {
+) -> Result<()> {
     use std::io::{self, IsTerminal};
 
     let mut harness = harness::create(&settings.agent)?;
     let decorate = io::stdout().is_terminal();
-    let cwd = std::env::current_dir()
-        .map_err(|error| format!("could not determine current directory: {error}"))?;
+    let cwd = current_dir()?;
     let response = ask_turn(
         harness.as_mut(),
         settings,
@@ -163,7 +163,7 @@ fn run_interactive(
     mut settings: Settings,
     mut saved: Option<state::Session>,
     mut config: config::Config,
-) -> Result<(), String> {
+) -> Result<()> {
     use std::io::{self, IsTerminal};
 
     let mut harness = harness::create(&settings.agent)?;
@@ -175,8 +175,7 @@ fn run_interactive(
         show_history(session, decorate)?;
     }
 
-    let cwd = std::env::current_dir()
-        .map_err(|error| format!("could not determine current directory: {error}"))?;
+    let cwd = current_dir()?;
     let mut session = saved
         .as_ref()
         .map(|session| session.harness_session_id.clone());
@@ -191,9 +190,12 @@ fn run_interactive(
             }
         } else {
             piped_line.clear();
-            let bytes = io::stdin()
-                .read_line(&mut piped_line)
-                .map_err(|error| format!("could not read input: {error}"))?;
+            let bytes = io::stdin().read_line(&mut piped_line).map_err(|error| {
+                Error::new(
+                    format!("could not read input: {error}"),
+                    "check stdin and try again",
+                )
+            })?;
             if bytes == 0 {
                 break;
             }
@@ -209,10 +211,13 @@ fn run_interactive(
             let command = parts.next().unwrap_or_default();
             let value = parts.next();
             if parts.next().is_some() {
-                eprintln!("ask: {command} accepts at most one value");
-                if terminal {
-                    eprintln!();
-                }
+                print_interactive_error(
+                    &Error::new(
+                        format!("invalid command '{question}'"),
+                        "use '/settings' with no value",
+                    ),
+                    terminal,
+                );
                 continue;
             }
 
@@ -225,13 +230,28 @@ fn run_interactive(
                     }
                 }
                 "/settings" if value.is_none() => {
-                    eprintln!("ask: /settings requires an interactive terminal");
+                    print_interactive_error(
+                        &Error::new(
+                            "/settings requires an interactive terminal",
+                            "rerun ask in a terminal",
+                        ),
+                        terminal,
+                    );
+                }
+                "/settings" => {
+                    print_interactive_error(
+                        &Error::new(
+                            "/settings does not accept a value",
+                            "use '/settings' by itself",
+                        ),
+                        terminal,
+                    );
                 }
                 _ => {
-                    eprintln!("ask: unknown command '{command}' (available: /settings)");
-                    if terminal {
-                        eprintln!();
-                    }
+                    print_interactive_error(
+                        &Error::new(format!("unknown command '{command}'"), "use '/settings'"),
+                        terminal,
+                    );
                 }
             }
             continue;
@@ -247,8 +267,7 @@ fn run_interactive(
         ) {
             Ok(response) => response,
             Err(error) if terminal => {
-                eprintln!("ask: {error}");
-                eprintln!();
+                print_interactive_error(&error, true);
                 continue;
             }
             Err(error) => return Err(error),
@@ -264,11 +283,14 @@ fn run_interactive(
     Ok(())
 }
 
-fn standalone_settings() -> Result<(), String> {
+fn standalone_settings() -> Result<()> {
     use std::io::{self, IsTerminal};
 
     if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
-        return Err("--settings requires an interactive terminal".into());
+        return Err(Error::new(
+            "--settings requires an interactive terminal",
+            "rerun 'ask --settings' from a terminal",
+        ));
     }
     let mut config = config::Config::load()?;
     let mut cache = settings_ui::Cache::default();
@@ -282,7 +304,7 @@ fn ask_turn(
     question: &str,
     session_id: Option<&str>,
     decorate: bool,
-) -> Result<harness::Response, String> {
+) -> Result<harness::Response> {
     let mut output = TurnOutput::new(decorate);
     let mut spinner = spinner::Spinner::start(decorate && spinner::enabled());
     let response = harness.ask(
@@ -310,7 +332,7 @@ fn record_turn(
     cwd: &std::path::Path,
     question: &str,
     response: harness::Response,
-) -> Result<String, String> {
+) -> Result<String> {
     let stored = saved.get_or_insert_with(|| {
         state::Session::new(&settings.agent, response.session_id.clone(), cwd)
     });
@@ -328,7 +350,7 @@ fn session_settings(settings: &Settings) -> state::SessionSettings {
     }
 }
 
-fn show_history(session: &state::Session, decorate: bool) -> Result<(), String> {
+fn show_history(session: &state::Session, decorate: bool) -> Result<()> {
     eprintln!(
         "Continuing {} — {} turn{}",
         harness::agent_name(&session.agent),
@@ -352,7 +374,7 @@ fn show_history(session: &state::Session, decorate: bool) -> Result<(), String> 
     Ok(())
 }
 
-fn sessions() -> Result<(), String> {
+fn sessions() -> Result<()> {
     use std::io::{self, IsTerminal};
 
     let mut sessions = state::load_all()?;
@@ -432,7 +454,7 @@ fn session_items(sessions: &[state::Session]) -> Vec<select::Item> {
         .collect()
 }
 
-fn list_sessions(sessions: &[state::Session]) -> Result<(), String> {
+fn list_sessions(sessions: &[state::Session]) -> Result<()> {
     for session in sessions {
         let line = format!(
             "{:<6}  {:>3} turn{}  {:>8}  {}\n",
@@ -474,7 +496,7 @@ fn age(timestamp: u64) -> String {
     }
 }
 
-fn print_answer(answer: &str) -> Result<(), String> {
+fn print_answer(answer: &str) -> Result<()> {
     if answer.ends_with('\n') {
         write_stdout(&[answer.as_bytes()])
     } else {
@@ -510,7 +532,7 @@ impl TurnOutput {
         }
     }
 
-    fn push(&mut self, delta: &str) -> Result<(), String> {
+    fn push(&mut self, delta: &str) -> Result<()> {
         if !delta.is_empty() {
             self.streamed = true;
         }
@@ -520,7 +542,7 @@ impl TurnOutput {
         }
     }
 
-    fn finish(mut self, fallback: &str) -> Result<(), String> {
+    fn finish(mut self, fallback: &str) -> Result<()> {
         match &mut self.kind {
             TurnOutputKind::Rich(output) if !self.streamed => output.push(fallback)?,
             TurnOutputKind::Raw(_) | TurnOutputKind::Rich(_) => {}
@@ -534,7 +556,7 @@ impl TurnOutput {
 }
 
 impl RawStream {
-    fn push(&mut self, delta: &str) -> Result<(), String> {
+    fn push(&mut self, delta: &str) -> Result<()> {
         if delta.is_empty() {
             return Ok(());
         }
@@ -543,7 +565,7 @@ impl RawStream {
         write_stdout(&[delta.as_bytes()])
     }
 
-    fn finish(&self, fallback: &str) -> Result<(), String> {
+    fn finish(&self, fallback: &str) -> Result<()> {
         if !self.wrote {
             print_answer(fallback)
         } else if !self.ends_with_newline {
@@ -554,7 +576,7 @@ impl RawStream {
     }
 }
 
-fn write_stdout(parts: &[&[u8]]) -> Result<(), String> {
+fn write_stdout(parts: &[&[u8]]) -> Result<()> {
     use std::io::{self, Write};
 
     let mut stdout = io::stdout().lock();
@@ -562,10 +584,31 @@ fn write_stdout(parts: &[&[u8]]) -> Result<(), String> {
         match stdout.write_all(part) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return Ok(()),
-            Err(error) => return Err(format!("could not write output: {error}")),
+            Err(error) => {
+                return Err(Error::new(
+                    format!("could not write output: {error}"),
+                    "check the output destination and try again",
+                ));
+            }
         }
     }
     Ok(())
+}
+
+fn current_dir() -> Result<std::path::PathBuf> {
+    std::env::current_dir().map_err(|error| {
+        Error::new(
+            format!("could not determine current directory: {error}"),
+            "change to an existing directory and try again",
+        )
+    })
+}
+
+fn print_interactive_error(error: &Error, blank_line: bool) {
+    error.print();
+    if blank_line {
+        eprintln!();
+    }
 }
 
 #[cfg(test)]

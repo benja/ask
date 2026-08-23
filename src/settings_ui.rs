@@ -9,6 +9,7 @@ use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal::{Clear, ClearType};
 
 use crate::config::Config;
+use crate::error::{Error, Result};
 use crate::harness::{self, Model, ReasoningControl};
 use crate::instructions::Instructions;
 use crate::select::{self, Choice, Item};
@@ -20,7 +21,7 @@ pub struct Cache {
 }
 
 impl Cache {
-    fn models(&mut self, agent: &str) -> Result<&[Model], String> {
+    fn models(&mut self, agent: &str) -> Result<&[Model]> {
         if self.agent.as_deref() != Some(agent) {
             self.models = load_models_with_delayed_feedback(agent)?;
             self.agent = Some(agent.to_owned());
@@ -29,7 +30,7 @@ impl Cache {
     }
 }
 
-pub fn run_defaults(config: &mut Config, cache: &mut Cache) -> Result<(), String> {
+pub fn run_defaults(config: &mut Config, cache: &mut Cache) -> Result<()> {
     let _screen = select::Screen::enter()?;
     defaults_menu(config, cache)
 }
@@ -38,12 +39,12 @@ pub fn run_session(
     settings: &mut crate::Settings,
     config: &mut Config,
     cache: &mut Cache,
-) -> Result<(), String> {
+) -> Result<()> {
     let _screen = select::Screen::enter()?;
     session_menu(settings, config, cache)
 }
 
-fn defaults_menu(config: &mut Config, cache: &mut Cache) -> Result<(), String> {
+fn defaults_menu(config: &mut Config, cache: &mut Cache) -> Result<()> {
     let mut selected = 0;
     loop {
         let definition = harness::resolve(&config.agent)?;
@@ -73,13 +74,13 @@ fn defaults_menu(config: &mut Config, cache: &mut Cache) -> Result<(), String> {
                     0 => select_agent(config)?,
                     1 => {
                         if let Err(error) = select_model(config, cache) {
-                            show_message("Could not load models", &error)?;
+                            show_error("Could not load models", &error)?;
                         }
                     }
                     2 => match definition.reasoning {
                         ReasoningControl::Selectable => {
                             if let Err(error) = select_reasoning(config, cache) {
-                                show_message("Could not load reasoning levels", &error)?;
+                                show_error("Could not load reasoning levels", &error)?;
                             }
                         }
                         ReasoningControl::Managed { explanation, .. } => {
@@ -99,7 +100,7 @@ fn session_menu(
     settings: &mut crate::Settings,
     config: &mut Config,
     cache: &mut Cache,
-) -> Result<(), String> {
+) -> Result<()> {
     let mut selected = 1;
     loop {
         let definition = harness::resolve(&settings.agent)?;
@@ -134,13 +135,13 @@ fn session_menu(
                 match index {
                     1 => {
                         if let Err(error) = select_model(settings, cache) {
-                            show_message("Could not load models", &error)?;
+                            show_error("Could not load models", &error)?;
                         }
                     }
                     2 => match definition.reasoning {
                         ReasoningControl::Selectable => {
                             if let Err(error) = select_reasoning(settings, cache) {
-                                show_message("Could not load reasoning levels", &error)?;
+                                show_error("Could not load reasoning levels", &error)?;
                             }
                         }
                         ReasoningControl::Managed { explanation, .. } => {
@@ -162,7 +163,7 @@ trait EditableSettings {
     fn reasoning(&self) -> Option<&str>;
     fn set_model(&mut self, model: Option<String>);
     fn set_reasoning(&mut self, reasoning: Option<String>);
-    fn save(&self) -> Result<(), String>;
+    fn save(&self) -> Result<()>;
 }
 
 impl EditableSettings for Config {
@@ -188,7 +189,7 @@ impl EditableSettings for Config {
         Config::set_reasoning(self, &agent, reasoning);
     }
 
-    fn save(&self) -> Result<(), String> {
+    fn save(&self) -> Result<()> {
         Config::save(self)
     }
 }
@@ -214,7 +215,7 @@ impl EditableSettings for crate::Settings {
         self.reasoning = reasoning;
     }
 
-    fn save(&self) -> Result<(), String> {
+    fn save(&self) -> Result<()> {
         Ok(())
     }
 }
@@ -227,7 +228,7 @@ fn instructions_name(config: &Config) -> &'static str {
     }
 }
 
-fn select_instructions(config: &mut Config) -> Result<(), String> {
+fn select_instructions(config: &mut Config) -> Result<()> {
     let items = [
         Item::new("Concise", "Friendly, direct answers"),
         Item::new("Agent default", "Do not add ask instructions"),
@@ -268,7 +269,7 @@ fn select_instructions(config: &mut Config) -> Result<(), String> {
     config.save()
 }
 
-fn select_agent(config: &mut Config) -> Result<(), String> {
+fn select_agent(config: &mut Config) -> Result<()> {
     let agents = detected_agents();
     if agents.is_empty() {
         show_message(
@@ -306,7 +307,7 @@ fn detected_agents() -> Vec<&'static harness::Definition> {
         .collect()
 }
 
-fn select_model(settings: &mut impl EditableSettings, cache: &mut Cache) -> Result<(), String> {
+fn select_model(settings: &mut impl EditableSettings, cache: &mut Cache) -> Result<()> {
     let agent = settings.agent().to_owned();
     let models = cache.models(&agent)?;
     let mut items = Vec::with_capacity(models.len() + 1);
@@ -351,13 +352,13 @@ fn select_model(settings: &mut impl EditableSettings, cache: &mut Cache) -> Resu
     settings.save()
 }
 
-fn select_reasoning(settings: &mut impl EditableSettings, cache: &mut Cache) -> Result<(), String> {
+fn select_reasoning(settings: &mut impl EditableSettings, cache: &mut Cache) -> Result<()> {
     let agent = settings.agent().to_owned();
     let models = cache.models(&agent)?;
     let selected_model = settings.model().ok_or_else(|| {
-        format!(
-            "Choose a {} model before setting reasoning",
-            harness::agent_name(&agent)
+        Error::new(
+            format!("no {} model is selected", harness::agent_name(&agent)),
+            "choose a model before setting reasoning",
         )
     })?;
     let model = models
@@ -365,16 +366,19 @@ fn select_reasoning(settings: &mut impl EditableSettings, cache: &mut Cache) -> 
         .find(|model| model.id == selected_model)
         .or_else(|| models.iter().find(|model| model.is_default))
         .ok_or_else(|| {
-            format!(
-                "{} did not identify a default model",
-                harness::agent_name(&agent)
+            Error::new(
+                format!(
+                    "{} did not identify a default model",
+                    harness::agent_name(&agent)
+                ),
+                "choose a model explicitly and try again",
             )
         })?;
 
     if model.reasoning.is_empty() {
-        return Err(format!(
-            "{} did not report any reasoning levels",
-            model.name
+        return Err(Error::new(
+            format!("{} did not report any reasoning levels", model.name),
+            "choose Model default or another model",
         ));
     }
 
@@ -412,12 +416,12 @@ fn select_reasoning(settings: &mut impl EditableSettings, cache: &mut Cache) -> 
     settings.save()
 }
 
-fn load_models(agent: &str) -> Result<Vec<Model>, String> {
+fn load_models(agent: &str) -> Result<Vec<Model>> {
     let mut harness = crate::harness::create(agent)?;
     harness.models()
 }
 
-fn load_models_with_delayed_feedback(agent: &str) -> Result<Vec<Model>, String> {
+fn load_models_with_delayed_feedback(agent: &str) -> Result<Vec<Model>> {
     let (sender, receiver) = mpsc::sync_channel(1);
     let requested = agent.to_owned();
     std::thread::spawn(move || {
@@ -431,13 +435,9 @@ fn load_models_with_delayed_feedback(agent: &str) -> Result<Vec<Model>, String> 
                 "Models",
                 &format!("Loading models from {}…", harness::agent_name(agent)),
             )?;
-            receiver
-                .recv()
-                .map_err(|_| "model discovery stopped unexpectedly".to_string())?
+            receiver.recv().map_err(|_| model_discovery_error())?
         }
-        Err(RecvTimeoutError::Disconnected) => {
-            Err("model discovery stopped unexpectedly".to_string())
-        }
+        Err(RecvTimeoutError::Disconnected) => Err(model_discovery_error()),
     }
 }
 
@@ -457,11 +457,11 @@ fn title_case(value: &str) -> String {
         .unwrap_or_default()
 }
 
-fn choose(title: &str, subtitle: &str, items: &[Item], initial: usize) -> Result<Choice, String> {
+fn choose(title: &str, subtitle: &str, items: &[Item], initial: usize) -> Result<Choice> {
     select::choose(title, subtitle, items, initial)
 }
 
-fn show_loading(title: &str, message: &str) -> Result<(), String> {
+fn show_loading(title: &str, message: &str) -> Result<()> {
     let mut output = io::stderr();
     execute!(
         output,
@@ -473,23 +473,38 @@ fn show_loading(title: &str, message: &str) -> Result<(), String> {
         Print(format!("\r\n\r\n{message}"))
     )
     .and_then(|()| output.flush())
-    .map_err(|error| format!("could not draw settings: {error}"))
+    .map_err(|error| Error::terminal("could not draw settings", error))
 }
 
-fn show_message(title: &str, message: &str) -> Result<(), String> {
+fn show_message(title: &str, message: &str) -> Result<()> {
     show_loading(title, message)?;
     let mut output = io::stderr();
     execute!(output, Print("\r\n\r\nPress any key to go back."))
         .and_then(|()| output.flush())
-        .map_err(|error| format!("could not draw settings: {error}"))?;
+        .map_err(|error| Error::terminal("could not draw settings", error))?;
     loop {
         if matches!(
-            event::read().map_err(|error| format!("could not read settings input: {error}"))?,
+            event::read()
+                .map_err(|error| Error::terminal("could not read settings input", error))?,
             Event::Key(_)
         ) {
             return Ok(());
         }
     }
+}
+
+fn show_error(title: &str, error: &Error) -> Result<()> {
+    show_message(
+        title,
+        &format!("{}\r\n\r\n{}", error.message(), error.help()),
+    )
+}
+
+fn model_discovery_error() -> Error {
+    Error::new(
+        "model discovery stopped unexpectedly",
+        "close settings and try again",
+    )
 }
 
 #[cfg(test)]

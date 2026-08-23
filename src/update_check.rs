@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+use crate::error::{Error, Result};
 use crate::{storage, upgrade};
 
 const CHECK_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
@@ -69,14 +70,14 @@ fn begin_refresh(path: &Path, fallback: &Cache, checked_at: u64) -> bool {
     write_cache(path, &cache).is_ok()
 }
 
-fn store_latest(path: &Path, checked_at: u64, latest: String) -> Result<(), String> {
+fn store_latest(path: &Path, checked_at: u64, latest: String) -> Result<()> {
     let mut cache = read_cache(path).unwrap_or_default();
     cache.checked_at = cache.checked_at.max(checked_at);
     cache.latest = Some(latest);
     write_cache(path, &cache)
 }
 
-fn mark_notified(path: &Path, version: &str) -> Result<(), String> {
+fn mark_notified(path: &Path, version: &str) -> Result<()> {
     let mut cache = read_cache(path).unwrap_or_default();
     cache.last_notified = Some(version.to_owned());
     write_cache(path, &cache)
@@ -120,14 +121,14 @@ fn optional_string(value: &Value, key: &str) -> Option<Option<String>> {
     }
 }
 
-fn write_cache(path: &Path, cache: &Cache) -> Result<(), String> {
+fn write_cache(path: &Path, cache: &Cache) -> Result<()> {
     let value = json!({
         "checked_at": cache.checked_at,
         "latest": cache.latest,
         "last_notified": cache.last_notified,
     });
     let bytes = serde_json::to_vec_pretty(&value)
-        .map_err(|error| format!("could not encode update cache: {error}"))?;
+        .map_err(|error| Error::internal(format!("could not encode update cache: {error}")))?;
     storage::write_private(path, &bytes, "update cache")
 }
 

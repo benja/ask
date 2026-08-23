@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use serde_json::{Map, Value, json};
 
+use crate::error::{Error, Result};
 use crate::instructions::Instructions;
 use crate::{harness, storage};
 
@@ -41,21 +42,30 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn load() -> Result<Self, String> {
+    pub fn load() -> Result<Self> {
         let path = path()?;
         if !path.exists() {
             return Ok(Self::default());
         }
 
-        let bytes = fs::read(&path)
-            .map_err(|error| format!("could not read '{}': {error}", path.display()))?;
-        let value: Value = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("could not parse '{}': {error}", path.display()))?;
+        let bytes = fs::read(&path).map_err(|error| {
+            Error::new(
+                format!("could not read '{}': {error}", path.display()),
+                "check its permissions and try again",
+            )
+        })?;
+        let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+            Error::new(
+                format!("could not parse '{}': {error}", path.display()),
+                "fix or remove the file, then try again",
+            )
+        })?;
 
         Self::from_value(&value)
+            .map_err(|error| error.context(format!("could not load '{}'", path.display())))
     }
 
-    pub fn save(&self) -> Result<(), String> {
+    pub fn save(&self) -> Result<()> {
         let path = path()?;
         let agents = self
             .agents
@@ -76,7 +86,7 @@ impl Config {
             "instructions": self.instructions.to_json(),
             "agents": agents,
         }))
-        .map_err(|error| format!("could not encode ask config: {error}"))?;
+        .map_err(|error| Error::internal(format!("could not encode ask config: {error}")))?;
         storage::write_private(&path, &bytes, "ask config")
     }
 
@@ -110,28 +120,32 @@ impl Config {
         self.instructions = instructions;
     }
 
-    fn from_value(value: &Value) -> Result<Self, String> {
+    fn from_value(value: &Value) -> Result<Self> {
         let raw_agent = value["agent"]
             .as_str()
-            .ok_or_else(|| "ask config is missing 'agent'".to_string())?;
+            .ok_or_else(|| invalid_config("config is missing 'agent'"))?;
         let agent = harness::find(raw_agent)
             .map_or(raw_agent, |definition| definition.id)
             .to_owned();
 
         let version = value.get("version").and_then(Value::as_u64).unwrap_or(1);
         if version > 2 {
-            return Err(format!(
-                "config version {version} requires a newer version of ask; run 'ask --upgrade'"
+            return Err(Error::new(
+                format!("config version {version} requires a newer version of ask"),
+                "run 'ask --upgrade'",
             ));
         }
         if version == 0 {
-            return Err("config version 0 is not supported".into());
+            return Err(Error::new(
+                "config version 0 is not supported",
+                "remove the config file, then run 'ask --settings'",
+            ));
         }
 
         let values = value
             .get("agents")
             .and_then(Value::as_object)
-            .ok_or_else(|| "ask config is missing 'agents'".to_string())?;
+            .ok_or_else(|| invalid_config("config is missing 'agents'"))?;
         let mut config = Self {
             agent,
             instructions: Instructions::from_json(
@@ -145,13 +159,15 @@ impl Config {
         Ok(config)
     }
 
-    fn load_agent_settings(&mut self, values: &Map<String, Value>) -> Result<(), String> {
+    fn load_agent_settings(&mut self, values: &Map<String, Value>) -> Result<()> {
         for (raw_id, value) in values {
             let id = harness::find(raw_id)
                 .map_or(raw_id.as_str(), |definition| definition.id)
                 .to_owned();
             if !value.is_object() {
-                return Err(format!("ask config has invalid 'agents.{raw_id}'"));
+                return Err(invalid_config(format!(
+                    "config has invalid 'agents.{raw_id}'"
+                )));
             }
             self.agents.insert(
                 id,
@@ -177,21 +193,29 @@ impl Config {
     }
 }
 
-fn optional_string(value: &Value, key: &str) -> Result<Option<String>, String> {
+fn optional_string(value: &Value, key: &str) -> Result<Option<String>> {
     match value.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => Ok(Some(value.clone())),
-        Some(_) => Err(format!("ask config has invalid '{key}'")),
+        Some(_) => Err(invalid_config(format!("config has invalid '{key}'"))),
     }
 }
 
-fn path() -> Result<PathBuf, String> {
+fn path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(path).join("ask/config.json"));
     }
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| "HOME is not set; set XDG_CONFIG_HOME to store settings".to_string())?;
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        Error::new(
+            "HOME is not set",
+            "set XDG_CONFIG_HOME to a writable directory and try again",
+        )
+    })?;
     Ok(PathBuf::from(home).join(".config/ask/config.json"))
+}
+
+fn invalid_config(message: impl Into<String>) -> Error {
+    Error::new(message, "fix or remove the config file, then try again")
 }
 
 #[cfg(test)]
