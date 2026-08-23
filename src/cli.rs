@@ -18,7 +18,7 @@ pub const HELP: &str = concat!(
     "      --settings      Choose defaults for new sessions\n",
     "      --upgrade       Upgrade to the latest release\n",
     "  -h, --help          Print help\n",
-    "  -v, --version       Print version\n",
+    "  -V, --version       Print version\n",
 );
 
 #[derive(Debug, Eq, PartialEq)]
@@ -54,7 +54,7 @@ pub fn parse(args: impl Iterator<Item = OsString>) -> Result<Mode, String> {
                 "-h" | "--help" => {
                     return Ok(Mode::Help);
                 }
-                "-v" | "--version" => {
+                "-V" | "-v" | "--version" => {
                     return Ok(Mode::Version);
                 }
                 "-c" | "--continue" => {
@@ -170,10 +170,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_lowercase_version() {
+    fn parses_version_flags() {
+        assert_eq!(parse(args(&["-V"])).unwrap(), Mode::Version);
         assert_eq!(parse(args(&["-v"])).unwrap(), Mode::Version);
         assert_eq!(parse(args(&["--version"])).unwrap(), Mode::Version);
-        assert!(parse(args(&["-V"])).is_err());
     }
 
     #[test]

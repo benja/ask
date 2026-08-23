@@ -79,7 +79,7 @@ ask -c [QUESTION...]       continue the latest session here
 ask --sessions             reopen a saved session
 ask --settings             set defaults for new sessions
 ask --upgrade              update ask
-ask -v                     print the version
+ask -V                     print the version
 ```
 
 Answers go to stdout. Prompts and errors go to stderr, so one-shot answers are safe to pipe. Agents start in the current directory and run read-only.

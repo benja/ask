@@ -68,7 +68,7 @@ jobs:
                   mkdir -p "$package" dist
                   cp "target/$target/release/ask" README.md LICENSE "$package/"
                   chmod 755 "$package/ask"
-                  "$package/ask" -v | grep -Fx "${GITHUB_REF_NAME#v}"
+                  "$package/ask" -V | grep -Fx "${GITHUB_REF_NAME#v}"
                   "$package/ask" --version | grep -Fx "${GITHUB_REF_NAME#v}"
                   tar -C "$package" -czf "dist/ask-$target.tar.gz" ask README.md LICENSE
             - uses: actions/upload-artifact@v7
