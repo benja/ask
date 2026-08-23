@@ -418,7 +418,11 @@ fn response_error(response: &Value) -> Result<(), String> {
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("unknown protocol error");
-        Err(format!("Codex app server error: {message}"))
+        if message.starts_with("thread ") && message.ends_with(" already has an active writer") {
+            Err("this session is open in another process".into())
+        } else {
+            Err(format!("Codex app server error: {message}"))
+        }
     } else {
         Ok(())
     }
