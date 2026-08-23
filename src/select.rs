@@ -5,11 +5,11 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal::{
-    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+    enable_raw_mode, size,
 };
 use unicode_width::UnicodeWidthStr;
 
-const MAX_VISIBLE_ITEMS: usize = 8;
 const DEFAULT_LABEL_WIDTH: usize = 18;
 
 pub struct Item {
@@ -66,6 +66,20 @@ enum DeleteKey {
     Confirmed,
 }
 
+#[derive(Clone, Copy)]
+struct Viewport {
+    capacity: usize,
+    width: usize,
+}
+
+#[derive(Clone, Copy)]
+struct DrawState {
+    selected: usize,
+    offset: usize,
+    delete: DeleteState,
+    viewport: Viewport,
+}
+
 pub fn choose(
     title: &str,
     subtitle: &str,
@@ -104,21 +118,35 @@ fn choose_inner(
     debug_assert!(!items.is_empty());
     debug_assert!(items.iter().any(|item| item.selectable));
     let mut selected = selectable_at_or_after(items, initial.min(items.len() - 1));
-    let mut offset = initial_offset(selected, items.len());
+    let initial_height = size().map_or(24, |(_, height)| height);
+    let mut offset = initial_offset(
+        selected,
+        items.len(),
+        visible_capacity(usize::from(initial_height), items.len()),
+    );
     let mut delete_state = if deletable {
         DeleteState::Ready
     } else {
         DeleteState::Disabled
     };
     loop {
+        let (terminal_width, terminal_height) = size().unwrap_or((80, 24));
+        let viewport = Viewport {
+            capacity: visible_capacity(usize::from(terminal_height), items.len()),
+            width: usize::from(terminal_width),
+        };
+        offset = keep_visible(selected, offset, items.len(), viewport.capacity);
         draw(
             title,
             subtitle,
             items,
-            selected,
-            offset,
             label_width,
-            delete_state,
+            DrawState {
+                selected,
+                offset,
+                delete: delete_state,
+                viewport,
+            },
         )?;
         let Event::Key(KeyEvent {
             code, modifiers, ..
@@ -145,7 +173,7 @@ fn choose_inner(
             }
             _ => {}
         }
-        offset = keep_visible(selected, offset, items.len());
+        offset = keep_visible(selected, offset, items.len(), viewport.capacity);
     }
 }
 
@@ -169,10 +197,8 @@ fn draw(
     title: &str,
     subtitle: &str,
     items: &[Item],
-    selected: usize,
-    offset: usize,
     label_width: usize,
-    delete_state: DeleteState,
+    state: DrawState,
 ) -> Result<(), String> {
     let mut output = io::stderr();
     execute!(
@@ -188,33 +214,32 @@ fn draw(
     )
     .map_err(|error| format!("could not draw menu: {error}"))?;
 
-    let end = (offset + MAX_VISIBLE_ITEMS).min(items.len());
-    for (index, item) in items.iter().enumerate().take(end).skip(offset) {
-        if index == selected {
+    let end = (state.offset + state.viewport.capacity).min(items.len());
+    let item_width = state.viewport.width.saturating_sub(6);
+    for (index, item) in items.iter().enumerate().take(end).skip(state.offset) {
+        let line = item_line(item, label_width, item_width);
+        if index == state.selected {
             execute!(
                 output,
                 SetAttribute(Attribute::Reverse),
-                Print(format!("  › {}  ", item_line(item, label_width))),
+                Print(format!("  › {line}  ")),
                 SetAttribute(Attribute::Reset),
                 Print("\r\n")
             )
         } else if item.selectable {
-            execute!(
-                output,
-                Print(format!("    {}\r\n", item_line(item, label_width)))
-            )
+            execute!(output, Print(format!("    {line}\r\n")))
         } else {
             execute!(
                 output,
                 SetAttribute(Attribute::Dim),
-                Print(format!("    {}\r\n", item_line(item, label_width))),
+                Print(format!("    {line}\r\n")),
                 SetAttribute(Attribute::Reset)
             )
         }
         .map_err(|error| format!("could not draw menu: {error}"))?;
     }
-    if items.len() > MAX_VISIBLE_ITEMS {
-        let status = match (offset > 0, end < items.len()) {
+    if items.len() > state.viewport.capacity {
+        let status = match (state.offset > 0, end < items.len()) {
             (false, true) => "↓ more",
             (true, true) => "↑ more — ↓ more",
             (true, false) => "↑ more",
@@ -223,7 +248,7 @@ fn draw(
         execute!(output, Print(format!("\r\n    {status}\r\n")))
             .map_err(|error| format!("could not draw menu: {error}"))?;
     }
-    let help = match delete_state {
+    let help = match state.delete {
         DeleteState::Confirming => "Delete this saved session?  enter delete  esc cancel",
         DeleteState::Ready => "↑/↓ move  enter continue  d delete  esc back",
         DeleteState::Disabled => "↑/↓ move  enter select  esc back",
@@ -233,9 +258,35 @@ fn draw(
         .map_err(|error| format!("could not draw menu: {error}"))
 }
 
-fn item_line(item: &Item, label_width: usize) -> String {
+fn item_line(item: &Item, label_width: usize, available_width: usize) -> String {
     let padding = label_width.saturating_sub(UnicodeWidthStr::width(item.label.as_str()));
-    format!("{}{} {}", item.label, " ".repeat(padding), item.detail)
+    truncate_width(
+        &format!("{}{} {}", item.label, " ".repeat(padding), item.detail),
+        available_width,
+    )
+}
+
+fn truncate_width(value: &str, available_width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= available_width {
+        return value.to_owned();
+    }
+    if available_width == 0 {
+        return String::new();
+    }
+
+    let content_width = available_width - 1;
+    let mut width = 0;
+    let mut truncated = String::new();
+    for character in value.chars() {
+        let character_width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        if width + character_width > content_width {
+            break;
+        }
+        truncated.push(character);
+        width += character_width;
+    }
+    truncated.push('…');
+    truncated
 }
 
 fn selectable_at_or_after(items: &[Item], initial: usize) -> usize {
@@ -258,19 +309,29 @@ fn move_selection(items: &[Item], selected: usize, forward: bool) -> usize {
         .unwrap_or(selected)
 }
 
-fn initial_offset(selected: usize, item_count: usize) -> usize {
+fn initial_offset(selected: usize, item_count: usize, capacity: usize) -> usize {
     selected
-        .saturating_sub(MAX_VISIBLE_ITEMS / 2)
-        .min(item_count.saturating_sub(MAX_VISIBLE_ITEMS))
+        .saturating_sub(capacity / 2)
+        .min(item_count.saturating_sub(capacity))
 }
 
-fn keep_visible(selected: usize, offset: usize, item_count: usize) -> usize {
+fn keep_visible(selected: usize, offset: usize, item_count: usize, capacity: usize) -> usize {
+    let offset = offset.min(item_count.saturating_sub(capacity));
     if selected < offset {
         selected
-    } else if selected >= offset + MAX_VISIBLE_ITEMS {
-        (selected + 1 - MAX_VISIBLE_ITEMS).min(item_count.saturating_sub(MAX_VISIBLE_ITEMS))
+    } else if selected >= offset + capacity {
+        (selected + 1 - capacity).min(item_count.saturating_sub(capacity))
     } else {
         offset
+    }
+}
+
+fn visible_capacity(terminal_height: usize, item_count: usize) -> usize {
+    let without_overflow = terminal_height.saturating_sub(5).max(1);
+    if item_count <= without_overflow {
+        item_count
+    } else {
+        terminal_height.saturating_sub(7).max(1).min(item_count)
     }
 }
 
@@ -298,7 +359,7 @@ impl Drop for Screen {
 mod tests {
     use super::{
         DeleteKey, DeleteState, Item, handle_delete_key, initial_offset, item_line, keep_visible,
-        move_selection, selectable_at_or_after,
+        move_selection, selectable_at_or_after, visible_capacity,
     };
     use crossterm::event::KeyCode;
 
@@ -328,28 +389,28 @@ mod tests {
 
     #[test]
     fn short_lists_do_not_scroll() {
-        assert_eq!(initial_offset(4, 5), 0);
-        assert_eq!(keep_visible(4, 0, 5), 0);
+        assert_eq!(initial_offset(4, 5, 8), 0);
+        assert_eq!(keep_visible(4, 0, 5, 8), 0);
     }
 
     #[test]
     fn initial_selection_is_centered_when_possible() {
-        assert_eq!(initial_offset(20, 100), 16);
-        assert_eq!(initial_offset(99, 100), 92);
+        assert_eq!(initial_offset(20, 100, 8), 16);
+        assert_eq!(initial_offset(99, 100, 8), 92);
     }
 
     #[test]
     fn viewport_moves_only_when_selection_crosses_an_edge() {
-        assert_eq!(keep_visible(4, 4, 100), 4);
-        assert_eq!(keep_visible(11, 4, 100), 4);
-        assert_eq!(keep_visible(12, 4, 100), 5);
-        assert_eq!(keep_visible(3, 4, 100), 3);
+        assert_eq!(keep_visible(4, 4, 100, 8), 4);
+        assert_eq!(keep_visible(11, 4, 100, 8), 4);
+        assert_eq!(keep_visible(12, 4, 100, 8), 5);
+        assert_eq!(keep_visible(3, 4, 100, 8), 3);
     }
 
     #[test]
     fn wrapped_selection_moves_to_the_opposite_end() {
-        assert_eq!(keep_visible(0, 92, 100), 0);
-        assert_eq!(keep_visible(99, 0, 100), 92);
+        assert_eq!(keep_visible(0, 92, 100, 8), 0);
+        assert_eq!(keep_visible(99, 0, 100, 8), 92);
     }
 
     #[test]
@@ -367,11 +428,30 @@ mod tests {
 
     #[test]
     fn label_width_is_a_minimum_in_terminal_columns() {
-        assert_eq!(item_line(&Item::new("name", "meta"), 8), "name     meta");
-        assert_eq!(item_line(&Item::new("好", "meta"), 4), "好   meta");
         assert_eq!(
-            item_line(&Item::new("a longer name", "meta"), 4),
+            item_line(&Item::new("name", "meta"), 8, 80),
+            "name     meta"
+        );
+        assert_eq!(item_line(&Item::new("好", "meta"), 4, 80), "好   meta");
+        assert_eq!(
+            item_line(&Item::new("a longer name", "meta"), 4, 80),
             "a longer name meta"
+        );
+    }
+
+    #[test]
+    fn viewport_uses_available_terminal_height() {
+        assert_eq!(visible_capacity(12, 20), 5);
+        assert_eq!(visible_capacity(40, 100), 33);
+        assert_eq!(visible_capacity(40, 4), 4);
+        assert_eq!(visible_capacity(3, 20), 1);
+    }
+
+    #[test]
+    fn long_items_are_kept_to_one_terminal_row() {
+        assert_eq!(
+            item_line(&Item::new("model", "long metadata"), 5, 12),
+            "model long …"
         );
     }
 }
