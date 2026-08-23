@@ -88,13 +88,35 @@ ask checks for updates at most once a day. If a new version is available, it let
 
 ## How it works
 
-Under the hood, ask runs Codex, Claude Code, Pi, or OpenCode using the CLI already installed and logged in on your machine.
+Under the hood, ask runs Codex, Claude Code, Pi, OpenCode, Cursor, or Grok
+using the CLI already installed and logged in on your machine.
 
 For a new session, ask uses your default agent, model, and reasoning. Continuing a session restores those saved choices and the underlying agent session ID. Answer instructions come from the current global setting. Ask starts the selected CLI read-only in your current folder, prints the answer to stdout, and saves the turn automatically.
 
 ## Agents and models
 
 Run `ask --settings` to choose the default agent, model, reasoning, and answer instructions. Use `/settings` inside a session to change that session's model or reasoning, or to edit the global answer instructions. Start a new session to switch agents.
+
+| Agent | Binary | Read-only mode | Sessions |
+| --- | --- | --- | --- |
+| Codex | `codex` | Codex read-only sandbox | Saved thread IDs |
+| Claude Code | `claude` | `--permission-mode plan` | Saved session IDs |
+| OpenCode | `opencode` | Read-only tools | Saved session IDs |
+| Pi | `pi` | Read-only tools (`read,grep,find,ls`) | Saved session IDs |
+| Cursor | `cursor-agent` (falls back to `agent`) | Ask mode (`--mode ask`) | Saved chat IDs |
+| Grok | `grok` (also checks `~/.grok/bin/grok`) | Plan mode (`--permission-mode plan`) | Saved session IDs |
+
+Cursor and Grok use the CLIs installed by:
+
+```sh
+curl https://cursor.com/install -fsS | bash   # Cursor
+curl -fsSL https://x.ai/cli/install.sh | bash # Grok, then `grok login`
+```
+
+Both install a binary named `agent`; Cursor is `cursor-agent` (Grok is `grok`).
+ask always calls the unambiguous name, falling back to `agent` only for Cursor.
+Set `ASK_CURSOR_BIN` to pick a specific Cursor CLI (for example
+`cursor-work-agent`) and `ASK_GROK_BIN` for a different Grok binary.
 
 ## Contributing
 

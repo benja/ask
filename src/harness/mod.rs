@@ -1,5 +1,7 @@
 mod claude;
 mod codex;
+mod cursor;
+mod grok;
 mod opencode;
 mod pi;
 
@@ -135,6 +137,31 @@ pub static DEFINITIONS: &[Definition] = &[
         program_env: "ASK_PI_BIN",
         create: |program| Box::new(pi::Pi::new(program)),
     },
+    Definition {
+        id: "cursor",
+        aliases: &["cursor-agent"],
+        name: "Cursor",
+        description: "Cursor Agent CLI",
+        default_model: None,
+        default_reasoning: None,
+        reasoning: ReasoningControl::Managed {
+            label: "Managed by Cursor",
+            explanation: "Cursor manages model selection and reasoning for its supported models.",
+        },
+        program_env: "ASK_CURSOR_BIN",
+        create: |program| Box::new(cursor::Cursor::new(program)),
+    },
+    Definition {
+        id: "grok",
+        aliases: &["grok-cli"],
+        name: "Grok",
+        description: "xAI Grok Build",
+        default_model: None,
+        default_reasoning: None,
+        reasoning: ReasoningControl::Selectable,
+        program_env: "ASK_GROK_BIN",
+        create: |program| Box::new(grok::Grok::new(program)),
+    },
 ];
 
 pub fn find(name: &str) -> Option<&'static Definition> {
@@ -203,6 +230,10 @@ mod tests {
         assert_eq!(resolve("codex").unwrap().id, "codex");
         assert_eq!(resolve("claude-code").unwrap().id, "claude");
         assert_eq!(resolve("open-code").unwrap().id, "opencode");
+        assert_eq!(resolve("cursor").unwrap().id, "cursor");
+        assert_eq!(resolve("cursor-agent").unwrap().id, "cursor");
+        assert_eq!(resolve("grok").unwrap().id, "grok");
+        assert_eq!(resolve("grok-cli").unwrap().id, "grok");
         assert!(resolve("missing").is_err());
     }
 }
