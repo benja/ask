@@ -119,8 +119,13 @@ impl Config {
             .to_owned();
 
         let version = value.get("version").and_then(Value::as_u64).unwrap_or(1);
-        if !matches!(version, 1 | 2) {
-            return Err(format!("ask config version {version} is not supported"));
+        if version > 2 {
+            return Err(format!(
+                "config version {version} requires a newer version of ask; run 'ask --upgrade'"
+            ));
+        }
+        if version == 0 {
+            return Err("config version 0 is not supported".into());
         }
 
         let values = value
