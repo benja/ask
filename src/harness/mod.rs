@@ -1,5 +1,6 @@
 mod claude;
 mod codex;
+mod fx;
 mod opencode;
 mod pi;
 
@@ -111,6 +112,20 @@ pub static DEFINITIONS: &[Definition] = &[
         create: |program| Box::new(claude::Claude::new(program)),
     },
     Definition {
+        id: "fx",
+        aliases: &[],
+        name: "fx",
+        description: "fx coding agent",
+        default_model: None,
+        default_reasoning: None,
+        reasoning: ReasoningControl::Managed {
+            label: "Managed by fx",
+            explanation: "fx manages reasoning automatically for its selected model.",
+        },
+        program_env: "ASK_FX_BIN",
+        create: |program| Box::new(fx::Fx::new(program)),
+    },
+    Definition {
         id: "opencode",
         aliases: &["open-code"],
         name: "OpenCode",
@@ -203,6 +218,7 @@ mod tests {
         assert_eq!(resolve("codex").unwrap().id, "codex");
         assert_eq!(resolve("claude-code").unwrap().id, "claude");
         assert_eq!(resolve("open-code").unwrap().id, "opencode");
+        assert_eq!(resolve("fx").unwrap().id, "fx");
         assert!(resolve("missing").is_err());
     }
 }
