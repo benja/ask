@@ -88,9 +88,11 @@ ask checks for updates at most once a day. If a new version is available, it let
 
 ## How it works
 
-Under the hood, ask runs Codex, Claude Code, Pi, or OpenCode using the CLI already installed and logged in on your machine.
+Under the hood, ask runs Codex, Claude Code, fx, Pi, or OpenCode using the CLI already installed and logged in on your machine.
 
 For a new session, ask uses your default agent, model, and reasoning. Continuing a session restores those saved choices and the underlying agent session ID. Answer instructions come from the current global setting. Ask starts the selected CLI read-only in your current folder, prints the answer to stdout, and saves the turn automatically.
+
+ask starts fx in `ask` permission mode. Existing fx allow rules still apply, so remove rules that permit changes if you need fx to be strictly read-only.
 
 ## Agents and models
 
